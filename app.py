@@ -153,39 +153,12 @@ def analyze(sym):
     except: bal=pd.DataFrame()
     try: cf=t.cashflow
     except: cf=pd.DataFrame()
-
-    # توزيعات الأرباح: نستخدم تاريخ توزيعات Yahoo كطبقة سوقية، ونحسب TTM و3 سنوات.
-    dividends = pd.Series(dtype=float)
-    try:
-        dividends = t.dividends
-        if dividends is None: dividends = pd.Series(dtype=float)
-        dividends = pd.to_numeric(dividends, errors='coerce').dropna()
-    except Exception:
-        dividends = pd.Series(dtype=float)
-    today = pd.Timestamp.utcnow().tz_localize(None)
-    ttm_start = today - pd.Timedelta(days=365)
-    three_y_start = today - pd.Timedelta(days=365*3)
-    div_ttm = float(dividends[dividends.index.tz_localize(None) >= ttm_start].sum()) if len(dividends) else np.nan
-    div_3y = float(dividends[dividends.index.tz_localize(None) >= three_y_start].sum()) if len(dividends) else np.nan
-    last_div = float(dividends.iloc[-1]) if len(dividends) else np.nan
-    last_div_date = dividends.index[-1].date().isoformat() if len(dividends) else ''
-
-    sec=sector(sym,info); met=extract(info,inc,bal,cf,sec);
-    if pd.isna(met.get('Dividend Yield')) and pd.notna(div_ttm) and pd.notna(met.get('_price')) and met.get('_price') > 0:
-        met['Dividend Yield'] = div_ttm / met['_price'] * 100
-    met.update({'Dividend TTM': div_ttm, 'Dividend 3Y': div_3y, 'Last Dividend': last_div, 'Last Dividend Date': last_div_date, 'Dividend Data Source': 'Yahoo Finance / yfinance'})
-
-    # اكتمال البيانات الأساسية: لا نعاقب السهم على غياب مؤشر غير مناسب لقطاعه.
-    core_fields = ['Revenue Growth','Net Income Growth','EPS Growth','ROE','ROA','Net Margin','Debt/Equity','P/E','P/B','Dividend Yield','Operating Cash Flow','_price','_mcap']
-    available_core = sum(pd.notna(met.get(x)) for x in core_fields)
-    completeness = available_core / len(core_fields) * 100
-    met['Data Completeness'] = completeness
-    fields=SECTOR_RULES[sec]; w=WEIGHTS[sec]
+    sec=sector(sym,info); met=extract(info,inc,bal,cf,sec); fields=SECTOR_RULES[sec]; w=WEIGHTS[sec]
     vals=[(score_metric(m,met.get(m)),w[m]) for m in fields if pd.notna(score_metric(m,met.get(m)))]
     raw=sum(v*ww for v,ww in vals)/sum(ww for _,ww in vals) if vals else np.nan
     coverage=sum(w[m] for m in fields if pd.notna(met.get(m)))/sum(w.values())*100
     final=raw*(.55+.45*coverage/100) if pd.notna(raw) else np.nan
-    return {'symbol':sym,'name':info.get('longName',sym),'sector':sec,'industry':info.get('industry',''),'score':final,'raw':raw,'coverage':coverage,'completeness':completeness,'metrics':met}
+    return {'symbol':sym,'name':info.get('longName',sym),'sector':sec,'industry':info.get('industry',''),'score':final,'raw':raw,'coverage':coverage,'metrics':met}
 
 @st.cache_data(ttl=3600,show_spinner=False)
 def run_all():
@@ -194,48 +167,139 @@ def run_all():
         fs={ex.submit(analyze,s):s for s in STOCKS}
         for f in as_completed(fs):
             try:out.append(f.result())
-            except Exception as e:out.append({'symbol':fs[f],'name':fs[f],'sector':'General','industry':'','score':np.nan,'raw':np.nan,'coverage':0,'completeness':0,'metrics':{}})
+            except Exception as e:out.append({'symbol':fs[f],'name':fs[f],'sector':'General','industry':'','score':np.nan,'raw':np.nan,'coverage':0,'metrics':{}})
     return out
 
-st.title('📊 EGX Financial Analyzer V2')
-st.caption(f'Sector-Aware Fundamental Engine — {len(STOCKS)} سهم فريد من Universe V9')
+def technical(df):
+    if df is None or df.empty: return {}
+    d=df.copy(); d.columns=[str(c).title() for c in d.columns]
+    if 'Close' not in d.columns or len(d)<60: return {}
+    close=pd.to_numeric(d['Close'],errors='coerce').dropna()
+    if len(close)<60: return {}
+    vol=pd.to_numeric(d.get('Volume',pd.Series(index=close.index)),errors='coerce').reindex(close.index)
+    ema20=close.ewm(span=20,adjust=False).mean(); ema50=close.ewm(span=50,adjust=False).mean(); ema200=close.ewm(span=200,adjust=False).mean()
+    delta=close.diff(); gain=delta.clip(lower=0).ewm(alpha=1/14,adjust=False).mean(); loss=(-delta.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean(); rsi=100-(100/(1+gain/loss.replace(0,np.nan)))
+    macd=close.ewm(span=12,adjust=False).mean()-close.ewm(span=26,adjust=False).mean(); signal=macd.ewm(span=9,adjust=False).mean()
+    high=pd.to_numeric(d['High'],errors='coerce'); low=pd.to_numeric(d['Low'],errors='coerce')
+    tr=pd.concat([high-low,(high-close.shift()).abs(),(low-close.shift()).abs()],axis=1).max(axis=1); atr=tr.rolling(14).mean()
+    vma=vol.rolling(20).mean(); vr=vol.iloc[-1]/vma.iloc[-1] if pd.notna(vma.iloc[-1]) and vma.iloc[-1] else np.nan
+    c=float(close.iloc[-1]); e20=float(ema20.iloc[-1]); e50=float(ema50.iloc[-1]); e200=float(ema200.iloc[-1]) if pd.notna(ema200.iloc[-1]) else np.nan
+    flags=[c>e20,c>e50,(c>e200 if pd.notna(e200) else False),rsi.iloc[-1]>50,macd.iloc[-1]>signal.iloc[-1],(vr>=1 if pd.notna(vr) else False)]
+    score=sum(flags)/len(flags)*100
+    trend='صاعد قوي' if c>e20>e50 and (pd.isna(e200) or e50>e200) else 'صاعد' if c>e20 and e20>e50 else 'هابط قوي' if c<e20<e50 else 'محايد'
+    return {'Technical Score':score,'Trend':trend,'RSI':float(rsi.iloc[-1]),'MACD':float(macd.iloc[-1]),'MACD Signal':float(signal.iloc[-1]),'ATR %':float(atr.iloc[-1]/c*100) if pd.notna(atr.iloc[-1]) else np.nan,'Volume Ratio':float(vr) if pd.notna(vr) else np.nan,'Distance EMA200 %':float((c/e200-1)*100) if pd.notna(e200) and e200 else np.nan,'Support':float(close.tail(20).min()),'Resistance':float(close.tail(20).max()),'52W High':float(close.tail(252).max()),'52W Low':float(close.tail(252).min()),'Price':c,'Last Date':close.index[-1].strftime('%Y-%m-%d')}
+
+def valuation(m,price,sec):
+    if pd.isna(price) or price<=0: return {}
+    eps=n(m.get('_eps')); eq=n(m.get('_equity')); fcf=n(m.get('_fcf')); mcap=n(m.get('_mcap')); shares=mcap/price if pd.notna(mcap) else np.nan
+    vals=[]
+    if pd.notna(eps) and eps>0: vals.append(eps*(10 if sec in ['Banks','Financial Services'] else 12))
+    if pd.notna(eq) and pd.notna(shares) and shares>0: vals.append((eq/shares)*(1.3 if sec=='Banks' else 1.5))
+    if pd.notna(fcf) and fcf>0 and pd.notna(shares) and shares>0: vals.append((fcf/shares)*10)
+    if not vals: return {}
+    lo=float(np.percentile(vals,25)); hi=float(np.percentile(vals,75)); mid=(lo+hi)/2
+    return {'Fair Low':lo,'Fair Mid':mid,'Fair High':hi,'Upside %':(mid/price-1)*100,'MOS Buy':mid*.80,'Strong Buy':mid*.70}
+
+def dividend_data(t,price):
+    try:
+        s=pd.to_numeric(t.dividends,errors='coerce').dropna(); s=s[s>0]
+        if s.empty: return {'Dividend 12M':np.nan,'Dividend Yield %':np.nan,'Last Dividend':np.nan,'Last Dividend Date':'—','Dividend Count 3Y':0}
+        now=pd.Timestamp.now(tz=s.index.tz) if getattr(s.index,'tz',None) else pd.Timestamp.now()
+        d12=s[s.index>=now-pd.Timedelta(days=365)]
+        d3=s[s.index>=now-pd.Timedelta(days=1095)]
+        total=float(d12.sum()); last=float(s.iloc[-1])
+        return {'Dividend 12M':total,'Dividend Yield %':total/price*100 if price else np.nan,'Last Dividend':last,'Last Dividend Date':s.index[-1].strftime('%Y-%m-%d'),'Dividend Count 3Y':len(d3)}
+    except Exception: return {'Dividend 12M':np.nan,'Dividend Yield %':np.nan,'Last Dividend':np.nan,'Last Dividend Date':'—','Dividend Count 3Y':0}
+
+def analyze(sym):
+    t=yf.Ticker(sym)
+    try: info=t.info or {}
+    except: info={}
+    try: inc=t.financials
+    except: inc=pd.DataFrame()
+    try: bal=t.balance_sheet
+    except: bal=pd.DataFrame()
+    try: cf=t.cashflow
+    except: cf=pd.DataFrame()
+    sec=sector(sym,info); met=extract(info,inc,bal,cf,sec); fields=SECTOR_RULES[sec]; w=WEIGHTS[sec]
+    vals=[(score_metric(m,met.get(m)),w[m]) for m in fields if pd.notna(score_metric(m,met.get(m)))]
+    raw=sum(v*ww for v,ww in vals)/sum(ww for _,ww in vals) if vals else np.nan
+    coverage=sum(w[m] for m in fields if pd.notna(met.get(m)))/sum(w.values())*100
+    try:
+        h=t.history(period='5d',interval='1d',auto_adjust=False); price=float(h['Close'].dropna().iloc[-1]); lastdate=h['Close'].dropna().index[-1].strftime('%Y-%m-%d')
+    except Exception: price=n(info.get('currentPrice')); lastdate='—'
+    div=dividend_data(t,price); met['Dividend Yield']=div['Dividend Yield %']; met['_price']=price
+    fair=valuation(met,price,sec)
+    final=raw*(.55+.45*coverage/100) if pd.notna(raw) else np.nan
+    quality=100 if coverage>=85 else 85 if coverage>=70 else 65 if coverage>=50 else 40
+    return {'symbol':sym,'name':info.get('longName',sym),'sector':sec,'industry':info.get('industry',''),'score':final,'raw':raw,'coverage':coverage,'quality':quality,'metrics':met,'valuation':fair,'dividend':div,'lastdate':lastdate}
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def run_market():
+    try: return yf.download(STOCKS,period='2y',interval='1d',group_by='ticker',auto_adjust=False,threads=True,progress=False)
+    except Exception: return pd.DataFrame()
+
+def get_hist(market,sym):
+    try:
+        if isinstance(market.columns,pd.MultiIndex):
+            if sym in market.columns.get_level_values(0): return market[sym].dropna(how='all')
+            if sym in market.columns.get_level_values(1): return market.xs(sym,axis=1,level=1).dropna(how='all')
+        return market
+    except: return pd.DataFrame()
+
+st.title('📊 EGX Financial Analyzer V4 PRO')
+st.caption(f'Fundamental + Valuation + Dividends + Technical | {len(STOCKS)} سهم فريد | آخر إغلاق يومي + تاريخ الشمعة')
 with st.sidebar:
-    st.header('⚙️ الفلاتر')
+    st.header('⚙️ الإعدادات')
     sectors=st.multiselect('القطاعات',list(SECTOR_RULES),default=list(SECTOR_RULES))
-    mincov=st.slider('Minimum Data Coverage %',0,100,40,5)
+    mincov=st.slider('حد اكتمال البيانات %',0,100,50,5)
+    minscore=st.slider('الحد الأدنى للدرجة',0,100,0,5)
     if st.button('🔄 تحديث البيانات'):
-        run_all.clear(); st.rerun()
-
-with st.spinner('جاري تحميل القوائم المالية وتحليل الأسهم...'):
-    results=run_all()
-
+        run_all.clear(); run_market.clear(); st.rerun()
+with st.spinner('جاري تحليل القوائم المالية والسوق...'):
+    results=run_all(); market=run_market()
+tech={r['symbol']:technical(get_hist(market,r['symbol'])) for r in results}
 rows=[]
 for r in results:
-    if r['sector'] in sectors and r['coverage']>=mincov:
-        m=r['metrics']; rows.append({'Rank':0,'السهم':r['symbol'],'الشركة':r['name'],'القطاع':r['sector'],'Financial Score':r['score'],'Data Coverage %':r['coverage'],'نسبة اكتمال البيانات %':r.get('completeness',0),'Revenue Growth %':m.get('Revenue Growth',np.nan),'Net Income Growth %':m.get('Net Income Growth',np.nan),'EPS Growth %':m.get('EPS Growth',np.nan),'ROE %':m.get('ROE',np.nan),'ROIC %':m.get('ROIC',np.nan),'Net Margin %':m.get('Net Margin',np.nan),'P/E':m.get('P/E',np.nan),'P/B':m.get('P/B',np.nan),'Dividend Yield %':m.get('Dividend Yield',np.nan),'توزيعات آخر 12 شهر':m.get('Dividend TTM',np.nan),'توزيعات 3 سنوات':m.get('Dividend 3Y',np.nan)})
+    if r['sector'] not in sectors or r['coverage']<mincov or (pd.notna(r['score']) and r['score']<minscore): continue
+    m=r['metrics']; v=r['valuation']; d=r['dividend']; tt=tech.get(r['symbol'],{}); fs=n(r['score']); ts=n(tt.get('Technical Score')); final=fs*.65+ts*.35 if pd.notna(fs) and pd.notna(ts) else fs
+    rows.append({'Rank':0,'السهم':r['symbol'].replace('.CA',''),'الشركة':r['name'],'القطاع':r['sector'],'المالي':fs,'الفني':ts,'النهائي':final,'السعر الحالي':n(tt.get('Price',m.get('_price'))),'القيمة العادلة':v.get('Fair Mid',np.nan),'الصعود المحتمل %':v.get('Upside %',np.nan),'شراء قوي':v.get('Strong Buy',np.nan),'عائد التوزيع %':d.get('Dividend Yield %',np.nan),'اكتمال البيانات %':r['coverage'],'جودة البيانات':r['quality'],'الاتجاه':tt.get('Trend','—'),'آخر شمعة':tt.get('Last Date',r['lastdate'])})
 df=pd.DataFrame(rows)
 if not df.empty:
-    df=df.sort_values('Financial Score',ascending=False,na_position='last').reset_index(drop=True); df['Rank']=np.arange(1,len(df)+1)
-st.subheader('🏆 الترتيب المالي')
-if df.empty: st.warning('لا توجد نتائج حسب الفلاتر.')
-else: st.dataframe(df.style.format({c:'{:.1f}' for c in df.columns if c not in ['Rank','السهم','الشركة','القطاع']},na_rep='—'),use_container_width=True,hide_index=True)
-
-st.subheader('🏭 ملخص القطاعات')
+    df=df.sort_values(['النهائي','المالي'],ascending=False,na_position='last').reset_index(drop=True); df['Rank']=np.arange(1,len(df)+1)
+st.subheader('🏆 الترتيب الاحترافي')
+if df.empty: st.warning('لا توجد نتائج وفق الفلاتر الحالية.')
+else:
+    st.dataframe(df.style.format({c:'{:.1f}' for c in df.columns if c not in ['Rank','السهم','الشركة','القطاع','الاتجاه','آخر شمعة','جودة البيانات']},na_rep='—'),use_container_width=True,hide_index=True)
+    st.download_button('⬇️ تنزيل CSV',df.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'EGX_V4_PRO.csv','text/csv')
+st.subheader('🏭 تحليل القطاعات')
 srows=[]
 for sec in SECTOR_RULES:
-    rr=[r for r in results if r['sector']==sec and r['coverage']>=mincov and pd.notna(r['score'])]
-    if rr:srows.append({'القطاع':sec,'عدد الأسهم':len(rr),'متوسط Score':np.mean([r['score'] for r in rr]),'متوسط Coverage':np.mean([r['coverage'] for r in rr]),'متوسط اكتمال البيانات':np.mean([r.get('completeness',0) for r in rr])})
-if srows:st.dataframe(pd.DataFrame(srows).style.format({'متوسط Score':'{:.1f}','متوسط Coverage':'{:.0f}','متوسط اكتمال البيانات':'{:.0f}'}),use_container_width=True,hide_index=True)
-
-st.subheader('🔎 تحليل سهم بالتفصيل')
-syms=[r['symbol'] for r in results]
-if syms:
-    sel=st.selectbox('السهم',sorted(syms)); r=next(x for x in results if x['symbol']==sel); m=r['metrics']; fields=SECTOR_RULES[r['sector']]
-    a,b,c,d=st.columns(4); a.metric('Financial Score','—' if pd.isna(r['score']) else f"{r['score']:.1f}"); b.metric('Raw Score','—' if pd.isna(r['raw']) else f"{r['raw']:.1f}"); c.metric('Data Coverage',f"{r['coverage']:.0f}%"); d.metric('السعر', '—' if pd.isna(m.get('_price')) else f"{m['_price']:.2f} EGP")
-    st.write(f"**القطاع:** {r['sector']} | **الصناعة:** {r['industry'] or 'غير متاحة'} | **اكتمال البيانات:** {r.get('completeness',0):.0f}%")
-    st.write(f"**توزيعات آخر 12 شهر:** {m.get('Dividend TTM',np.nan):.2f} | **توزيعات آخر 3 سنوات:** {m.get('Dividend 3Y',np.nan):.2f} | **آخر توزيع:** {m.get('Last Dividend',np.nan):.2f} ({m.get('Last Dividend Date') or 'غير متاح'}) | **مصدر التوزيعات:** {m.get('Dividend Data Source','غير متاح')}")
-    detail=[]
-    for x in fields: detail.append({'المؤشر':x,'القيمة':m.get(x,np.nan),'Score':score_metric(x,m.get(x)),'متاح':'✅' if pd.notna(m.get(x)) else '❌'})
-    st.dataframe(pd.DataFrame(detail).style.format({'القيمة':'{:.2f}','Score':'{:.1f}'},na_rep='—'),use_container_width=True,hide_index=True)
-
-st.divider(); st.info('الـScore لا يعامل البيانات الناقصة كصفر ولا يسمح بتقييم مرتفع مع تغطية منخفضة. مؤشرات البنوك مختلفة عن العقار والصناعة والطاقة والرعاية الصحية والاتصالات والخدمات المالية.')
+    rr=[x for x in results if x['sector']==sec and x['coverage']>=mincov and pd.notna(x['score'])]
+    if rr:srows.append({'القطاع':sec,'عدد الأسهم':len(rr),'متوسط المالي':np.mean([x['score'] for x in rr]),'متوسط الاكتمال':np.mean([x['coverage'] for x in rr]),'متوسط الجودة':np.mean([x['quality'] for x in rr])})
+if srows: st.dataframe(pd.DataFrame(srows).style.format({'متوسط المالي':'{:.1f}','متوسط الاكتمال':'{:.0f}','متوسط الجودة':'{:.0f}'}),use_container_width=True,hide_index=True)
+st.subheader('🔎 تقرير سهم كامل')
+if results:
+    sel=st.selectbox('السهم',sorted([r['symbol'] for r in results]),format_func=lambda x:x.replace('.CA','')); r=next(x for x in results if x['symbol']==sel); m=r['metrics']; v=r['valuation']; d=r['dividend']; tt=tech.get(sel,{})
+    fs=n(r['score']); ts=n(tt.get('Technical Score')); final=fs*.65+ts*.35 if pd.notna(fs) and pd.notna(ts) else fs; price=n(tt.get('Price',m.get('_price')))
+    a,b,c,e,f,g=st.columns(6); a.metric('المالي','—' if pd.isna(fs) else f'{fs:.1f}'); b.metric('الفني','—' if pd.isna(ts) else f'{ts:.1f}'); c.metric('النهائي','—' if pd.isna(final) else f'{final:.1f}'); e.metric('السعر','—' if pd.isna(price) else f'{price:.2f} EGP'); f.metric('القيمة العادلة','—' if pd.isna(v.get('Fair Mid',np.nan)) else f"{v['Fair Mid']:.2f}"); g.metric('اكتمال البيانات',f"{r['coverage']:.0f}%")
+    st.write(f"**{r['name']}** | **القطاع:** {r['sector']} | **الصناعة:** {r['industry'] or 'غير متاحة'} | **آخر شمعة:** {tt.get('Last Date',r['lastdate'])}")
+    st.markdown('### 💰 القيمة العادلة وسعر الشراء')
+    val=pd.DataFrame([{'المؤشر':'القيمة العادلة الدنيا','القيمة':v.get('Fair Low',np.nan)},{'المؤشر':'القيمة العادلة الوسطى','القيمة':v.get('Fair Mid',np.nan)},{'المؤشر':'القيمة العادلة العليا','القيمة':v.get('Fair High',np.nan)},{'المؤشر':'الصعود المحتمل %','القيمة':v.get('Upside %',np.nan)},{'المؤشر':'شراء بهامش أمان 20%','القيمة':v.get('MOS Buy',np.nan)},{'المؤشر':'شراء قوي بهامش أمان 30%','القيمة':v.get('Strong Buy',np.nan)}]); st.dataframe(val.style.format({'القيمة':'{:.2f}'},na_rep='—'),use_container_width=True,hide_index=True)
+    st.markdown('### 💵 التوزيعات')
+    dv=pd.DataFrame([{'آخر توزيعة':d.get('Last Dividend',np.nan),'تاريخ آخر توزيعة':d.get('Last Dividend Date','—'),'توزيعات 12 شهر':d.get('Dividend 12M',np.nan),'عائد التوزيع %':d.get('Dividend Yield %',np.nan),'عدد توزيعات 3 سنوات':d.get('Dividend Count 3Y',0)}]); st.dataframe(dv.style.format({'آخر توزيعة':'{:.3f}','توزيعات 12 شهر':'{:.3f}','عائد التوزيع %':'{:.2f}'},na_rep='—'),use_container_width=True,hide_index=True)
+    st.markdown('### 📈 التحليل الفني')
+    st.dataframe(pd.DataFrame([{'المؤشر':k,'القيمة':val} for k,val in tt.items() if k!='Technical Score']),use_container_width=True,hide_index=True)
+    st.markdown('### 📊 المؤشرات المالية')
+    fields=SECTOR_RULES[r['sector']]; detail=[{'المؤشر':x,'القيمة':m.get(x,np.nan),'Score':score_metric(x,m.get(x)),'متاح':'✅' if pd.notna(m.get(x)) else '❌'} for x in fields]; st.dataframe(pd.DataFrame(detail).style.format({'القيمة':'{:.2f}','Score':'{:.1f}'},na_rep='—'),use_container_width=True,hide_index=True)
+    st.markdown('### 🎯 أهداف 3 سنوات — 3 سيناريوهات')
+    eps=n(m.get('_eps')); gg=n(m.get('EPS Growth'))
+    if pd.notna(price) and pd.notna(eps) and eps>0:
+        g=max(0,min(30,0 if pd.isna(gg) else gg)); scenarios=[]
+        for name,gr,pe in [('محافظ',max(0,g-8),9),('أساسي',g,12),('متفائل',min(35,g+8),15)]: scenarios.append({'السيناريو':name,'نمو EPS سنوي %':gr,'P/E':pe,'هدف 3 سنوات':eps*((1+gr/100)**3)*pe})
+        st.dataframe(pd.DataFrame(scenarios).style.format({'نمو EPS سنوي %':'{:.1f}','P/E':'{:.1f}','هدف 3 سنوات':'{:.2f}'}),use_container_width=True,hide_index=True)
+    else: st.info('لا توجد بيانات EPS كافية لبناء أهداف 3 سنوات كمية.')
+    st.markdown('### 🧪 جودة البيانات')
+    st.progress(min(max(r['coverage']/100,0),1),text=f"اكتمال البيانات: {r['coverage']:.0f}% | جودة: {r['quality']}/100")
+    st.caption('القيمة العادلة والأهداف نماذج تقديرية وليست ضمانًا. Yahoo/yfinance قد يفتقد أو يؤخر بعض بيانات EGX، لذلك يظهر اكتمال البيانات وتاريخ آخر شمعة.')
+st.divider(); st.info('V4 PRO يحافظ على منطق التقييم القطاعي، ويضيف السعر الحديث، التوزيعات، القيمة العادلة، التحليل الفني، جودة البيانات، ودمجًا 65% مالي + 35% فني. البيانات الناقصة لا تتحول إلى صفر.')

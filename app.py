@@ -4,28 +4,44 @@ import pandas as pd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from typing import Dict, Any
+
+# ============================================================
+# EGX INSTITUTIONAL V5.1
+# ============================================================
+# Financial Intelligence
+# Realistic FCFF DCF
+# Relative Valuation
+# Conservative / Base / Optimistic Scenarios
+# Forensic Quality
+# Dividend Analysis
+# V9 Technical
+# Backtest / WFO / Monte Carlo
+# Stability
+# Final Investment Score
+# ============================================================
 
 st.set_page_config(
-    page_title='EGX Institutional V5',
-    page_icon='🏛️',
-    layout='wide'
+    page_title="EGX Institutional V5.1",
+    page_icon="🏛️",
+    layout="wide"
 )
 
 # ============================================================
-# EGX INSTITUTIONAL V5
-# Data -> TTM Normalization -> Financial Quality ->
-# True FCFF Valuation -> 3 Scenario DCF ->
-# Relative Valuation -> Dividends ->
-# V9 Technical -> Backtest/WFO/OOS/Monte Carlo ->
-# Stability -> Final Investment Score
+# UNIVERSE
 # ============================================================
 
 RAW = '''COMI MFPC PHDC ORAS HDBK EFIH AMES INEG BTFH BIOC CLHO MBSC MTIE EGTS EGSA MHOT EGBE IFAP PRDC MIPH MPCI MOIN ISMQ AXPH PHTV CPCI NINH SPIN ENGC CNFN SVCE KABO OFH GSSC WCDF MFSC SAIB ACGC UEFM KZPC ADCI INFI ASCM VALU ZEOT SMFR ETRS CIRA QNBE EDFM MILS GBCO ACTF SCTS HRHO TMGH FWRY SWDY ETEL AMOC HELI EAST EFID JUFO ABUK ESRS EMFD CCAP ACAP CICH OCDI ORHD MASR AIHC ADIB SAUD CIEB FAIT AFDI CANA EXPA ARCC AJWA MICH SUGR POUL DOMT ISMA UEGC FERC UBEE FAITA MNHD SUCE SMPP ALEX CRST DCRC DIFC MAAL GGRN GGCC IEEC NDRL EFIC GPIM RTVC RUBX PRMH UNIP TWSA ICLE MEGM EASB APSW MOED KWIN KORA RMDA OIH NAPR BONY SPHT SDTI GTWL CFGH NAHO ACAMD NARE CEFM ASPI SCFM CERA DEIN MBEG SIPC NHPS ROTO TYCN RAKT EEII CCRS AREH EPCO FCMD GRCA GIHD ELWA MMAT NEDA EPPK GMCI CPME VLMR GPPL ADPC ADRI AIDC OBRI RREI RKAZ SEIG SNFC TANM UPMS UTOP VERT WKOL LUTS AIFI AMIA AMII ACRO DGTZ DTPP EALR EBSC EGREF EHDR ELNA EOSB FIRE FNAR FTNS GOUR ICID IDRE KASABF KRDI LCSW MOSC TAQA OLFI SKPC AMER TALM ALUM ORWE SPMD ZMID MENA DAPH RAYA EGAL ECAP MPRC AFMC NCCW SCEM ARAB GDWA ELEC IRON ATQA EGCH ALCN MPCO ELSH MEPA ODIN EGAS RACC PRCL BINV EDBM MCQE MOIL NIPH ISPH DSCW AALR UNIT PHAR TRTO CAED CSAG ICFC ELKA PHGC NCGC MCRO ATLC COSG AMPI COPR OCPH'''.split()
 
-STOCKS = list(dict.fromkeys(x + '.CA' for x in RAW))
+STOCKS = list(dict.fromkeys(x + ".CA" for x in RAW))
 
-BANKS = set('COMI HDBK EGBE SAIB QNBE CICH SAUD CIEB ADIB'.split())
+# ============================================================
+# SECTORS
+# ============================================================
+
+BANKS = set(
+    'COMI HDBK EGBE SAIB QNBE CICH SAUD CIEB ADIB'.split()
+)
 
 RE = set(
     'PHDC PRDC TMGH HELI EMFD CCAP OCDI ORHD MASR MNHD DCRC ARCC '
@@ -36,7 +52,9 @@ HEALTH = set(
     'BIOC CLHO MIPH NIPH ISPH PHAR SPMD DAPH PHTV OCPH'.split()
 )
 
-TECH = set('ETEL MTIE RAYA EFIH UBEE DGTZ GOUR'.split())
+TECH = set(
+    'ETEL MTIE RAYA EFIH UBEE DGTZ GOUR'.split()
+)
 
 ENERGY = set(
     'AMOC SKPC EGAS TAQA MOIL GPIM EGAL ELSH MEPA'.split()
@@ -57,89 +75,111 @@ FIN = set(
 
 INDUSTRIAL = set(
     x for x in RAW
-    if x not in BANKS | RE | HEALTH | TECH | ENERGY |
-    CONSUMER | CONSTRUCTION | FIN
+    if x not in (
+        BANKS
+        | RE
+        | HEALTH
+        | TECH
+        | ENERGY
+        | CONSUMER
+        | CONSTRUCTION
+        | FIN
+    )
 )
 
 SECTOR_RULES = {
-    'Banks': [
-        'ROE', 'ROA', 'NIM', 'Cost/Income', 'NPL',
-        'NPL Coverage', 'CAR', 'Loan Growth', 'Deposit Growth',
-        'Net Income Growth', 'P/B', 'P/E', 'Dividend Yield'
+    "Banks": [
+        "ROE", "ROA", "NIM", "Cost/Income", "NPL", "NPL Coverage",
+        "CAR", "Loan Growth", "Deposit Growth", "Net Income Growth",
+        "P/B", "P/E", "Dividend Yield"
     ],
-    'Real Estate': [
-        'Revenue Growth', 'EPS Growth', 'EBITDA Margin',
-        'Net Margin', 'ROE', 'Debt/Equity', 'Net Debt/EBITDA',
-        'Operating Cash Flow', 'FCF Margin', 'P/B', 'P/E'
+
+    "Real Estate": [
+        "Revenue Growth", "EPS Growth", "EBITDA Margin",
+        "Net Margin", "ROE", "Debt/Equity", "Net Debt/EBITDA",
+        "Operating Cash Flow", "FCF Margin", "P/B", "P/E"
     ],
-    'Healthcare': [
-        'Revenue Growth', 'EPS Growth', 'Net Margin',
-        'EBITDA Margin', 'ROE', 'ROA', 'FCF Margin',
-        'Debt/Equity', 'Current Ratio', 'P/E', 'P/B'
+
+    "Healthcare": [
+        "Revenue Growth", "EPS Growth", "Net Margin",
+        "EBITDA Margin", "ROE", "ROA", "FCF Margin",
+        "Debt/Equity", "Current Ratio", "P/E", "P/B"
     ],
-    'Telecom & Technology': [
-        'Revenue Growth', 'EPS Growth', 'EBITDA Margin',
-        'Net Margin', 'ROIC', 'FCF Margin', 'Net Debt/EBITDA',
-        'ROE', 'P/E', 'EV/EBITDA', 'Dividend Yield'
+
+    "Telecom & Technology": [
+        "Revenue Growth", "EPS Growth", "EBITDA Margin",
+        "Net Margin", "ROIC", "FCF Margin", "Net Debt/EBITDA",
+        "ROE", "P/E", "EV/EBITDA", "Dividend Yield"
     ],
-    'Energy & Petrochemicals': [
-        'Revenue Growth', 'EPS Growth', 'EBITDA Margin',
-        'Net Margin', 'ROIC', 'FCF Margin', 'Debt/Equity',
-        'Net Debt/EBITDA', 'ROE', 'P/E', 'EV/EBITDA',
-        'Dividend Yield'
+
+    "Energy & Petrochemicals": [
+        "Revenue Growth", "EPS Growth", "EBITDA Margin",
+        "Net Margin", "ROIC", "FCF Margin", "Debt/Equity",
+        "Net Debt/EBITDA", "ROE", "P/E", "EV/EBITDA",
+        "Dividend Yield"
     ],
-    'Consumer': [
-        'Revenue Growth', 'EPS Growth', 'Gross Margin',
-        'EBITDA Margin', 'Net Margin', 'ROE', 'ROIC',
-        'FCF Margin', 'Debt/Equity', 'P/E', 'Dividend Yield'
+
+    "Consumer": [
+        "Revenue Growth", "EPS Growth", "Gross Margin",
+        "EBITDA Margin", "Net Margin", "ROE", "ROIC",
+        "FCF Margin", "Debt/Equity", "P/E", "Dividend Yield"
     ],
-    'Construction & Engineering': [
-        'Revenue Growth', 'EBITDA Margin', 'Net Margin',
-        'ROE', 'ROIC', 'Operating Cash Flow', 'FCF Margin',
-        'Debt/Equity', 'Net Debt/EBITDA', 'P/E', 'P/B'
+
+    "Construction & Engineering": [
+        "Revenue Growth", "EBITDA Margin", "Net Margin",
+        "ROE", "ROIC", "Operating Cash Flow", "FCF Margin",
+        "Debt/Equity", "Net Debt/EBITDA", "P/E", "P/B"
     ],
-    'Industrial & Materials': [
-        'Revenue Growth', 'EPS Growth', 'Gross Margin',
-        'EBITDA Margin', 'Net Margin', 'ROE', 'ROIC',
-        'FCF Margin', 'Debt/Equity', 'Net Debt/EBITDA',
-        'P/E', 'P/B', 'Dividend Yield'
+
+    "Industrial & Materials": [
+        "Revenue Growth", "EPS Growth", "Gross Margin",
+        "EBITDA Margin", "Net Margin", "ROE", "ROIC",
+        "FCF Margin", "Debt/Equity", "Net Debt/EBITDA",
+        "P/E", "P/B", "Dividend Yield"
     ],
-    'Financial Services': [
-        'Revenue Growth', 'Net Income Growth', 'ROE', 'ROA',
-        'Net Margin', 'Debt/Equity', 'Current Ratio',
-        'P/E', 'P/B', 'Dividend Yield'
+
+    "Financial Services": [
+        "Revenue Growth", "Net Income Growth", "ROE", "ROA",
+        "Net Margin", "Debt/Equity", "Current Ratio",
+        "P/E", "P/B", "Dividend Yield"
     ],
-    'General': [
-        'Revenue Growth', 'EPS Growth', 'Net Margin', 'ROE',
-        'ROA', 'ROIC', 'FCF Margin', 'Debt/Equity',
-        'Current Ratio', 'P/E', 'P/B', 'Dividend Yield'
+
+    "General": [
+        "Revenue Growth", "EPS Growth", "Net Margin",
+        "ROE", "ROA", "ROIC", "FCF Margin",
+        "Debt/Equity", "Current Ratio", "P/E", "P/B",
+        "Dividend Yield"
     ]
 }
 
+# IMPORTANT:
+# Fixed syntax + explicit construction.
 WEIGHTS = {
-    k: {m: 1 / len(v)}
-    for k, v in SECTOR_RULES.items()
+    sector_name: {
+        metric: 1.0 / len(metrics)
+        for metric in metrics
+    }
+    for sector_name, metrics in SECTOR_RULES.items()
 }
 
-WEIGHTS['Banks'] = {
-    'ROE': .15,
-    'ROA': .07,
-    'NIM': .12,
-    'Cost/Income': .10,
-    'NPL': .10,
-    'NPL Coverage': .07,
-    'CAR': .10,
-    'Loan Growth': .07,
-    'Deposit Growth': .05,
-    'Net Income Growth': .08,
-    'P/B': .05,
-    'P/E': .02,
-    'Dividend Yield': .02
+WEIGHTS["Banks"] = {
+    "ROE": .15,
+    "ROA": .07,
+    "NIM": .12,
+    "Cost/Income": .10,
+    "NPL": .10,
+    "NPL Coverage": .07,
+    "CAR": .10,
+    "Loan Growth": .07,
+    "Deposit Growth": .05,
+    "Net Income Growth": .08,
+    "P/B": .05,
+    "P/E": .02,
+    "Dividend Yield": .02
 }
-
 
 # ============================================================
-# BASIC HELPERS
+# HELPERS
 # ============================================================
 
 def num(x):
@@ -152,7 +192,25 @@ def num(x):
 
 def pct(x):
     x = num(x)
-    return np.nan if pd.isna(x) else x * 100
+    return np.nan if pd.isna(x) else x * 100.0
+
+
+def safe_mean(values):
+    vals = [
+        num(v)
+        for v in values
+        if pd.notna(num(v))
+    ]
+    return float(np.mean(vals)) if vals else np.nan
+
+
+def safe_median(values):
+    vals = [
+        num(v)
+        for v in values
+        if pd.notna(num(v))
+    ]
+    return float(np.median(vals)) if vals else np.nan
 
 
 def clean_series(s):
@@ -160,22 +218,24 @@ def clean_series(s):
         return None
 
     try:
-        s = pd.to_numeric(s, errors='coerce').dropna()
+        s = pd.to_numeric(s, errors="coerce").dropna()
+
         if len(s) == 0:
             return None
 
-        if not isinstance(s.index, pd.DatetimeIndex):
-            try:
-                s.index = pd.to_datetime(s.index)
-            except Exception:
-                pass
+        # yfinance financial statements are normally newest -> oldest.
+        # We explicitly sort dates when possible.
+        try:
+            s = s.sort_index(ascending=False)
+        except Exception:
+            pass
 
         return s
     except Exception:
         return None
 
 
-def last(s):
+def latest(s):
     s = clean_series(s)
 
     if s is None or len(s) == 0:
@@ -184,29 +244,28 @@ def last(s):
     return num(s.iloc[0])
 
 
+def previous(s):
+    s = clean_series(s)
+
+    if s is None or len(s) < 2:
+        return np.nan
+
+    return num(s.iloc[1])
+
+
 def growth(s):
     s = clean_series(s)
 
     if s is None or len(s) < 2:
         return np.nan
 
-    current = num(s.iloc[0])
-    previous = num(s.iloc[1])
+    newest = num(s.iloc[0])
+    old = num(s.iloc[1])
 
-    if pd.isna(current) or pd.isna(previous) or previous == 0:
+    if pd.isna(newest) or pd.isna(old) or old == 0:
         return np.nan
 
-    return (current / previous - 1) * 100
-
-
-def growth_ttm(current, previous):
-    current = num(current)
-    previous = num(previous)
-
-    if pd.isna(current) or pd.isna(previous) or previous == 0:
-        return np.nan
-
-    return (current / previous - 1) * 100
+    return (newest / old - 1.0) * 100.0
 
 
 def find(df, names):
@@ -215,52 +274,64 @@ def find(df, names):
 
     for name in names:
         if name in df.index:
-            return pd.to_numeric(df.loc[name], errors='coerce')
+            return pd.to_numeric(
+                df.loc[name],
+                errors="coerce"
+            )
 
     for idx in df.index:
         low = str(idx).lower()
 
         for name in names:
-            nl = name.lower()
+            n = str(name).lower()
 
-            if nl in low or low in nl:
-                return pd.to_numeric(df.loc[idx], errors='coerce')
+            if n in low or low in n:
+                return pd.to_numeric(
+                    df.loc[idx],
+                    errors="coerce"
+                )
 
     return None
 
 
-def sum_last_n(s, n=4):
-    s = clean_series(s)
+def find_value(df, names, default=np.nan):
+    s = find(df, names)
+    x = latest(s)
 
-    if s is None or len(s) < n:
-        return np.nan
-
-    return num(s.iloc[:n].sum())
+    return default if pd.isna(x) else x
 
 
-def sum_period(s, start, end):
-    s = clean_series(s)
-
-    if s is None:
+def get_latest_close(hist):
+    if hist is None or hist.empty:
         return np.nan
 
     try:
-        x = s[(s.index >= start) & (s.index <= end)]
-
-        if x.empty:
+        if "Close" not in hist.columns:
             return np.nan
 
-        return num(x.sum())
+        close = pd.to_numeric(
+            hist["Close"],
+            errors="coerce"
+        ).dropna()
+
+        if close.empty:
+            return np.nan
+
+        return num(close.iloc[-1])
     except Exception:
         return np.nan
 
 
-def get_latest_balance(df, names):
-    return last(find(df, names))
+def get_last_date(hist):
+    if hist is None or hist.empty:
+        return "—"
 
-
-def get_series_value(df, names):
-    return find(df, names)
+    try:
+        return pd.Timestamp(
+            hist.index[-1]
+        ).strftime("%Y-%m-%d")
+    except Exception:
+        return "—"
 
 
 # ============================================================
@@ -268,71 +339,74 @@ def get_series_value(df, names):
 # ============================================================
 
 def sector(sym, info):
-    s = sym.replace('.CA', '')
+    s = sym.replace(".CA", "")
 
     groups = [
-        (BANKS, 'Banks'),
-        (RE, 'Real Estate'),
-        (HEALTH, 'Healthcare'),
-        (TECH, 'Telecom & Technology'),
-        (ENERGY, 'Energy & Petrochemicals'),
-        (CONSUMER, 'Consumer'),
-        (CONSTRUCTION, 'Construction & Engineering'),
-        (FIN, 'Financial Services'),
-        (INDUSTRIAL, 'Industrial & Materials')
+        (BANKS, "Banks"),
+        (RE, "Real Estate"),
+        (HEALTH, "Healthcare"),
+        (TECH, "Telecom & Technology"),
+        (ENERGY, "Energy & Petrochemicals"),
+        (CONSUMER, "Consumer"),
+        (CONSTRUCTION, "Construction & Engineering"),
+        (FIN, "Financial Services"),
+        (INDUSTRIAL, "Industrial & Materials")
     ]
 
-    for g, n in groups:
-        if s in g:
-            return n
+    for group, name in groups:
+        if s in group:
+            return name
 
     text = (
-        str(info.get('sector', '')) +
-        ' ' +
-        str(info.get('industry', ''))
+        str(info.get("sector", ""))
+        + " "
+        + str(info.get("industry", ""))
     ).lower()
 
-    if 'bank' in text:
-        return 'Banks'
+    if "bank" in text:
+        return "Banks"
 
-    if 'real estate' in text:
-        return 'Real Estate'
-
-    if any(x in text for x in ['health', 'medical', 'pharma']):
-        return 'Healthcare'
+    if "real estate" in text:
+        return "Real Estate"
 
     if any(
         x in text
-        for x in ['telecom', 'software', 'technology', 'internet']
+        for x in ["health", "medical", "pharma"]
     ):
-        return 'Telecom & Technology'
+        return "Healthcare"
 
     if any(
         x in text
-        for x in ['oil', 'gas', 'energy', 'petro']
+        for x in ["telecom", "software", "technology", "internet"]
     ):
-        return 'Energy & Petrochemicals'
+        return "Telecom & Technology"
 
     if any(
         x in text
-        for x in ['consumer', 'food', 'beverage', 'retail']
+        for x in ["oil", "gas", "energy", "petro"]
     ):
-        return 'Consumer'
-
-    if 'construction' in text or 'engineering' in text:
-        return 'Construction & Engineering'
+        return "Energy & Petrochemicals"
 
     if any(
         x in text
-        for x in ['financial', 'insurance', 'investment']
+        for x in ["consumer", "food", "beverage", "retail"]
     ):
-        return 'Financial Services'
+        return "Consumer"
 
-    return 'General'
+    if "construction" in text or "engineering" in text:
+        return "Construction & Engineering"
+
+    if any(
+        x in text
+        for x in ["financial", "insurance", "investment"]
+    ):
+        return "Financial Services"
+
+    return "General"
 
 
 # ============================================================
-# MULTI-SOURCE DATA
+# DATA SOURCE
 # ============================================================
 
 @dataclass
@@ -340,7 +414,7 @@ class SourceResult:
     source: str
     ok: bool
     data: Any = None
-    error: str = ''
+    error: str = ""
 
 
 class DataSourceManager:
@@ -352,42 +426,74 @@ class DataSourceManager:
 
         t = yf.Ticker(self.ticker)
 
-        info = t.info or {}
+        info = {}
+        financials = pd.DataFrame()
+        balance = pd.DataFrame()
+        cashflow = pd.DataFrame()
+        quarterly_financials = pd.DataFrame()
+        quarterly_balance = pd.DataFrame()
+        quarterly_cashflow = pd.DataFrame()
 
-        financials = t.financials
-        balance = t.balance_sheet
-        cashflow = t.cashflow
-
-        # NEW:
-        # Quarterly data for proper TTM calculations.
-        try:
-            q_financials = t.quarterly_financials
-        except Exception:
-            q_financials = pd.DataFrame()
+        errors = []
 
         try:
-            q_balance = t.quarterly_balance_sheet
-        except Exception:
-            q_balance = pd.DataFrame()
+            info = t.info or {}
+        except Exception as e:
+            errors.append(f"info: {e}")
 
         try:
-            q_cashflow = t.quarterly_cashflow
-        except Exception:
-            q_cashflow = pd.DataFrame()
+            financials = t.financials
+        except Exception as e:
+            errors.append(f"financials: {e}")
+
+        try:
+            balance = t.balance_sheet
+        except Exception as e:
+            errors.append(f"balance: {e}")
+
+        try:
+            cashflow = t.cashflow
+        except Exception as e:
+            errors.append(f"cashflow: {e}")
+
+        try:
+            quarterly_financials = t.quarterly_financials
+        except Exception as e:
+            errors.append(f"quarterly_financials: {e}")
+
+        try:
+            quarterly_balance = t.quarterly_balance_sheet
+        except Exception as e:
+            errors.append(f"quarterly_balance: {e}")
+
+        try:
+            quarterly_cashflow = t.quarterly_cashflow
+        except Exception as e:
+            errors.append(f"quarterly_cashflow: {e}")
+
+        # We don't fail the whole stock if one Yahoo endpoint fails.
+        ok = bool(
+            info
+            or not financials.empty
+            or not balance.empty
+            or not cashflow.empty
+        )
 
         return SourceResult(
-            'Yahoo Finance',
-            True,
-            {
-                'ticker': t,
-                'info': info,
-                'financials': financials,
-                'balance': balance,
-                'cashflow': cashflow,
-                'q_financials': q_financials,
-                'q_balance': q_balance,
-                'q_cashflow': q_cashflow
-            }
+            source="Yahoo Finance",
+            ok=ok,
+            data={
+                "ticker": t,
+                "info": info,
+                "financials": financials,
+                "balance": balance,
+                "cashflow": cashflow,
+                "quarterly_financials": quarterly_financials,
+                "quarterly_balance": quarterly_balance,
+                "quarterly_cashflow": quarterly_cashflow,
+                "source_errors": errors
+            },
+            error=" | ".join(errors)
         )
 
     def load(self):
@@ -396,145 +502,55 @@ class DataSourceManager:
             return self.yahoo()
 
         except Exception as e:
-
             return SourceResult(
-                'Yahoo Finance',
-                False,
+                source="Yahoo Finance",
+                ok=False,
                 error=str(e)
             )
-
-
-# ============================================================
-# PRICE FROM HISTORY
-# ============================================================
-
-def latest_market_price(ticker, info):
-    """
-    Uses the latest daily candle as the primary price.
-    Falls back to Yahoo currentPrice / regularMarketPrice.
-    """
-
-    try:
-
-        hist = ticker.history(
-            period='15d',
-            interval='1d',
-            auto_adjust=False
-        )
-
-        if (
-            hist is not None
-            and not hist.empty
-            and 'Close' in hist.columns
-        ):
-
-            close = pd.to_numeric(
-                hist['Close'],
-                errors='coerce'
-            ).dropna()
-
-            if not close.empty:
-
-                price = num(close.iloc[-1])
-
-                last_date = close.index[-1]
-
-                try:
-                    last_date = pd.Timestamp(last_date).strftime(
-                        '%Y-%m-%d'
-                    )
-                except Exception:
-                    last_date = '—'
-
-                return price, last_date
-
-    except Exception:
-        pass
-
-    for key in [
-        'regularMarketPrice',
-        'currentPrice',
-        'previousClose'
-    ]:
-
-        p = num(info.get(key))
-
-        if pd.notna(p) and p > 0:
-            return p, '—'
-
-    return np.nan, '—'
 
 
 # ============================================================
 # TTM HELPERS
 # ============================================================
 
-def ttm_flow(qdf, names, annual_df=None):
-    """
-    Prefer latest 4 quarters.
-    If quarterly data is unavailable, fallback to latest annual.
-    """
+def ttm_sum(df, names):
+    s = find(df, names)
 
-    s = find(qdf, names)
+    if s is None:
+        return np.nan
 
-    if s is not None:
+    s = clean_series(s)
 
-        s = clean_series(s)
+    if s is None or len(s) == 0:
+        return np.nan
 
-        if s is not None and len(s) >= 4:
-            return sum_last_n(s, 4)
+    # For quarterly statements, first four quarters.
+    vals = list(s.iloc[:4])
 
-        if s is not None and len(s) > 0:
-            # Partial quarterly data:
-            # do not fabricate a TTM from incomplete quarters.
-            return np.nan
+    if len(vals) < 4:
+        return np.nan
 
-    if annual_df is not None:
-        return last(find(annual_df, names))
-
-    return np.nan
+    return num(np.sum(vals))
 
 
-def previous_ttm_flow(qdf, names, annual_df=None):
-    """
-    Previous 4-quarter period.
-    Used for proper TTM growth.
-    """
+def ttm_eps(df):
+    s = find(
+        df,
+        [
+            "Diluted EPS",
+            "Basic EPS"
+        ]
+    )
 
-    s = find(qdf, names)
+    if s is None:
+        return np.nan
 
-    if s is not None:
+    s = clean_series(s)
 
-        s = clean_series(s)
+    if s is None or len(s) < 4:
+        return np.nan
 
-        if s is not None and len(s) >= 8:
-            return num(s.iloc[4:8].sum())
-
-    # Annual fallback:
-    # latest annual vs previous annual.
-    if annual_df is not None:
-        s = clean_series(find(annual_df, names))
-
-        if s is not None and len(s) >= 2:
-            return num(s.iloc[1])
-
-    return np.nan
-
-
-def ttm_eps(qdf, names, annual_df=None):
-    s = find(qdf, names)
-
-    if s is not None:
-
-        s = clean_series(s)
-
-        if s is not None and len(s) >= 4:
-            return num(s.iloc[:4].sum())
-
-    if annual_df is not None:
-        return last(find(annual_df, names))
-
-    return np.nan
+    return num(np.sum(s.iloc[:4]))
 
 
 # ============================================================
@@ -543,639 +559,583 @@ def ttm_eps(qdf, names, annual_df=None):
 
 def normalize_financials(raw):
 
-    info = raw.get('info', {})
+    info = raw.get("info", {}) or {}
 
     inc = raw.get(
-        'financials',
+        "financials",
         pd.DataFrame()
     )
 
     bal = raw.get(
-        'balance',
+        "balance",
         pd.DataFrame()
     )
 
     cf = raw.get(
-        'cashflow',
+        "cashflow",
         pd.DataFrame()
     )
 
     qinc = raw.get(
-        'q_financials',
+        "quarterly_financials",
         pd.DataFrame()
     )
 
     qbal = raw.get(
-        'q_balance',
+        "quarterly_balance",
         pd.DataFrame()
     )
 
     qcf = raw.get(
-        'q_cashflow',
+        "quarterly_cashflow",
         pd.DataFrame()
     )
 
     # --------------------------------------------------------
-    # TTM FLOW ITEMS
+    # Annual values
     # --------------------------------------------------------
 
-    R = ttm_flow(
-        qinc,
-        ['Total Revenue', 'Operating Revenue', 'Revenue'],
-        inc
+    R = latest(
+        find(
+            inc,
+            [
+                "Total Revenue",
+                "Operating Revenue",
+                "Revenue"
+            ]
+        )
     )
 
-    R_prev = previous_ttm_flow(
-        qinc,
-        ['Total Revenue', 'Operating Revenue', 'Revenue'],
-        inc
+    NI = latest(
+        find(
+            inc,
+            [
+                "Net Income",
+                "Net Income Common Stockholders"
+            ]
+        )
     )
 
-    NI = ttm_flow(
-        qinc,
-        ['Net Income', 'Net Income Common Stockholders'],
-        inc
+    EQ = latest(
+        find(
+            bal,
+            [
+                "Stockholders Equity",
+                "Total Equity Gross Minority Interest",
+                "Common Stock Equity",
+                "Total Equity"
+            ]
+        )
     )
 
-    NI_prev = previous_ttm_flow(
-        qinc,
-        ['Net Income', 'Net Income Common Stockholders'],
-        inc
+    AS = latest(
+        find(
+            bal,
+            [
+                "Total Assets"
+            ]
+        )
     )
 
-    EBIT = ttm_flow(
-        qinc,
-        ['EBIT', 'Operating Income'],
-        inc
+    D = latest(
+        find(
+            bal,
+            [
+                "Total Debt",
+                "Long Term Debt",
+                "Current Debt"
+            ]
+        )
     )
 
-    EBITDA = ttm_flow(
-        qinc,
-        ['EBITDA', 'Normalized EBITDA'],
-        inc
+    C = latest(
+        find(
+            bal,
+            [
+                "Cash Cash Equivalents And Short Term Investments",
+                "Cash And Cash Equivalents",
+                "Cash Financial"
+            ]
+        )
     )
 
-    GROSS = ttm_flow(
-        qinc,
-        ['Gross Profit'],
-        inc
+    OCF = latest(
+        find(
+            cf,
+            [
+                "Operating Cash Flow",
+                "Total Cash From Operating Activities"
+            ]
+        )
     )
 
-    OCF = ttm_flow(
+    CAPEX = latest(
+        find(
+            cf,
+            [
+                "Capital Expenditure",
+                "Capital Expenditures"
+            ]
+        )
+    )
+
+    EBIT = latest(
+        find(
+            inc,
+            [
+                "EBIT",
+                "Operating Income"
+            ]
+        )
+    )
+
+    EBITDA = latest(
+        find(
+            inc,
+            [
+                "EBITDA",
+                "Normalized EBITDA"
+            ]
+        )
+    )
+
+    GROSS = latest(
+        find(
+            inc,
+            [
+                "Gross Profit"
+            ]
+        )
+    )
+
+    D_AND_A = latest(
+        find(
+            cf,
+            [
+                "Depreciation And Amortization",
+                "Depreciation",
+                "Depreciation & Amortization"
+            ]
+        )
+    )
+
+    TAX_EXPENSE = latest(
+        find(
+            inc,
+            [
+                "Tax Provision",
+                "Tax Provision Expense",
+                "Income Tax Expense"
+            ]
+        )
+    )
+
+    PRETAX = latest(
+        find(
+            inc,
+            [
+                "Pretax Income",
+                "Pretax Income"
+            ]
+        )
+    )
+
+    WORKING_CAPITAL = latest(
+        find(
+            bal,
+            [
+                "Working Capital"
+            ]
+        )
+    )
+
+    RETAINED_EARNINGS = latest(
+        find(
+            bal,
+            [
+                "Retained Earnings",
+                "Retained Earnings Accumulated Deficit"
+            ]
+        )
+    )
+
+    # --------------------------------------------------------
+    # Prior year balance sheet values
+    # --------------------------------------------------------
+
+    previous_working_capital = previous(
+        find(
+            bal,
+            [
+                "Working Capital"
+            ]
+        )
+    )
+
+    # --------------------------------------------------------
+    # FCF
+    # --------------------------------------------------------
+
+    if (
+        pd.notna(OCF)
+        and pd.notna(CAPEX)
+    ):
+        if CAPEX < 0:
+            FCF = OCF + CAPEX
+        else:
+            FCF = OCF - CAPEX
+    else:
+        FCF = np.nan
+
+    # --------------------------------------------------------
+    # TTM override when available
+    # --------------------------------------------------------
+
+    TTM_R = ttm_sum(
+        qinc,
+        [
+            "Total Revenue",
+            "Operating Revenue",
+            "Revenue"
+        ]
+    )
+
+    TTM_NI = ttm_sum(
+        qinc,
+        [
+            "Net Income",
+            "Net Income Common Stockholders"
+        ]
+    )
+
+    TTM_OCF = ttm_sum(
         qcf,
         [
-            'Operating Cash Flow',
-            'Total Cash From Operating Activities'
-        ],
-        cf
+            "Operating Cash Flow",
+            "Total Cash From Operating Activities"
+        ]
     )
 
-    CAPEX = ttm_flow(
+    TTM_CAPEX = ttm_sum(
         qcf,
         [
-            'Capital Expenditure',
-            'Capital Expenditures'
-        ],
-        cf
+            "Capital Expenditure",
+            "Capital Expenditures"
+        ]
     )
 
-    DA = ttm_flow(
-        qcf,
-        [
-            'Depreciation And Amortization',
-            'Depreciation',
-            'Depreciation And Amortization In Cash Flow'
-        ],
-        cf
-    )
-
-    TAX = ttm_flow(
+    TTM_EBIT = ttm_sum(
         qinc,
         [
-            'Tax Provision',
-            'Income Tax Expense'
-        ],
-        inc
+            "EBIT",
+            "Operating Income"
+        ]
     )
 
-    PRETAX = ttm_flow(
+    TTM_EBITDA = ttm_sum(
         qinc,
         [
-            'Pretax Income',
-            'Pretax Income Loss'
-        ],
-        inc
+            "EBITDA",
+            "Normalized EBITDA"
+        ]
     )
+
+    TTM_GROSS = ttm_sum(
+        qinc,
+        [
+            "Gross Profit"
+        ]
+    )
+
+    TTM_EPS = ttm_eps(qinc)
+
+    # Use TTM where available.
+    if pd.notna(TTM_R):
+        R = TTM_R
+
+    if pd.notna(TTM_NI):
+        NI = TTM_NI
+
+    if pd.notna(TTM_OCF):
+        OCF = TTM_OCF
+
+    if pd.notna(TTM_CAPEX):
+        CAPEX = TTM_CAPEX
+
+    if pd.notna(TTM_EBIT):
+        EBIT = TTM_EBIT
+
+    if pd.notna(TTM_EBITDA):
+        EBITDA = TTM_EBITDA
+
+    if pd.notna(TTM_GROSS):
+        GROSS = TTM_GROSS
 
     # --------------------------------------------------------
-    # BALANCE SHEET
-    # Latest available quarter first.
+    # Shares
     # --------------------------------------------------------
-
-    EQ = get_latest_balance(
-        qbal,
-        [
-            'Stockholders Equity',
-            'Total Equity Gross Minority Interest',
-            'Common Stock Equity'
-        ]
-    )
-
-    if pd.isna(EQ):
-        EQ = get_latest_balance(
-            bal,
-            [
-                'Stockholders Equity',
-                'Total Equity Gross Minority Interest',
-                'Common Stock Equity'
-            ]
-        )
-
-    AS = get_latest_balance(
-        qbal,
-        ['Total Assets']
-    )
-
-    if pd.isna(AS):
-        AS = get_latest_balance(
-            bal,
-            ['Total Assets']
-        )
-
-    D = get_latest_balance(
-        qbal,
-        [
-            'Total Debt',
-            'Long Term Debt',
-            'Total Debt And Capital Lease Obligation'
-        ]
-    )
-
-    if pd.isna(D):
-        D = get_latest_balance(
-            bal,
-            [
-                'Total Debt',
-                'Long Term Debt',
-                'Total Debt And Capital Lease Obligation'
-            ]
-        )
-
-    C = get_latest_balance(
-        qbal,
-        [
-            'Cash Cash Equivalents And Short Term Investments',
-            'Cash And Cash Equivalents',
-            'Cash Financial'
-        ]
-    )
-
-    if pd.isna(C):
-        C = get_latest_balance(
-            bal,
-            [
-                'Cash Cash Equivalents And Short Term Investments',
-                'Cash And Cash Equivalents',
-                'Cash Financial'
-            ]
-        )
-
-    CURRENT_ASSETS = get_latest_balance(
-        qbal,
-        [
-            'Current Assets',
-            'Total Current Assets'
-        ]
-    )
-
-    if pd.isna(CURRENT_ASSETS):
-        CURRENT_ASSETS = get_latest_balance(
-            bal,
-            [
-                'Current Assets',
-                'Total Current Assets'
-            ]
-        )
-
-    CURRENT_LIABILITIES = get_latest_balance(
-        qbal,
-        [
-            'Current Liabilities',
-            'Total Current Liabilities'
-        ]
-    )
-
-    if pd.isna(CURRENT_LIABILITIES):
-        CURRENT_LIABILITIES = get_latest_balance(
-            bal,
-            [
-                'Current Liabilities',
-                'Total Current Liabilities'
-            ]
-        )
-
-    WORKING_CAPITAL = (
-        CURRENT_ASSETS - CURRENT_LIABILITIES
-        if pd.notna(CURRENT_ASSETS)
-        and pd.notna(CURRENT_LIABILITIES)
-        else np.nan
-    )
-
-    RETAINED = get_latest_balance(
-        qbal,
-        [
-            'Retained Earnings',
-            'Retained Earnings Common'
-        ]
-    )
-
-    if pd.isna(RETAINED):
-        RETAINED = get_latest_balance(
-            bal,
-            [
-                'Retained Earnings',
-                'Retained Earnings Common'
-            ]
-        )
-
-    # --------------------------------------------------------
-    # PRICE / SHARES
-    # --------------------------------------------------------
-
-    price, last_price_date = latest_market_price(
-        raw['ticker'],
-        info
-    )
-
-    mcap = num(info.get('marketCap'))
 
     shares = num(
-        info.get('sharesOutstanding')
+        info.get("sharesOutstanding")
     )
 
-    # Safe fallback.
-    if pd.isna(shares) or shares <= 0:
-
-        if (
-            pd.notna(mcap)
-            and pd.notna(price)
-            and price > 0
-        ):
-            shares = mcap / price
-
-    EPS = ttm_eps(
-        qinc,
-        ['Diluted EPS', 'Basic EPS'],
-        inc
+    # Fallback from market cap / latest market price.
+    market_cap = num(
+        info.get("marketCap")
     )
 
-    # If EPS is unavailable, derive it from TTM NI / shares.
+    info_price = num(
+        info.get("currentPrice")
+    )
+
     if (
-        pd.isna(EPS)
-        and pd.notna(NI)
-        and pd.notna(shares)
-        and shares > 0
+        pd.isna(shares)
+        and pd.notna(market_cap)
+        and pd.notna(info_price)
+        and info_price > 0
     ):
-        EPS = NI / shares
+        shares = market_cap / info_price
 
-    BVPS = (
-        EQ / shares
-        if pd.notna(EQ)
-        and pd.notna(shares)
-        and shares > 0
-        else np.nan
+    EPS = (
+        TTM_EPS
+        if pd.notna(TTM_EPS)
+        else latest(
+            find(
+                inc,
+                [
+                    "Diluted EPS",
+                    "Basic EPS"
+                ]
+            )
+        )
     )
 
     # --------------------------------------------------------
-    # FCFF INPUTS
+    # Growth
     # --------------------------------------------------------
 
-    # Tax rate:
-    # use actual TTM tax / pretax when possible.
+    revenue_growth = growth(
+        find(
+            inc,
+            [
+                "Total Revenue",
+                "Operating Revenue",
+                "Revenue"
+            ]
+        )
+    )
+
+    ni_growth = growth(
+        find(
+            inc,
+            [
+                "Net Income",
+                "Net Income Common Stockholders"
+            ]
+        )
+    )
+
+    eps_growth = growth(
+        find(
+            inc,
+            [
+                "Diluted EPS",
+                "Basic EPS"
+            ]
+        )
+    )
+
+    # --------------------------------------------------------
+    # Tax Rate
+    # --------------------------------------------------------
+
     tax_rate = np.nan
 
     if (
-        pd.notna(TAX)
+        pd.notna(TAX_EXPENSE)
         and pd.notna(PRETAX)
         and PRETAX > 0
     ):
         tax_rate = np.clip(
-            TAX / PRETAX,
+            TAX_EXPENSE / PRETAX,
             0,
             .40
         )
 
     if pd.isna(tax_rate):
-        tax_rate = .22
+        tax_rate = num(
+            info.get("effectiveTaxRate")
+        )
 
-    # NOPAT
-    NOPAT = (
-        EBIT * (1 - tax_rate)
-        if pd.notna(EBIT)
-        else np.nan
-    )
+    if pd.notna(tax_rate):
+        if tax_rate > 1:
+            tax_rate /= 100.0
 
-    # FCFF historical proxy:
-    # NOPAT + D&A - Capex - change NWC
-    #
-    # Change in NWC requires two balance-sheet dates.
-    # If unavailable, keep Delta NWC at zero rather than inventing it.
-    delta_nwc = 0.0
-
-    # Capex is normally negative in cashflow statements.
-    capex_outflow = (
-        abs(CAPEX)
-        if pd.notna(CAPEX)
-        else np.nan
-    )
-
-    FCFF = np.nan
-
-    if (
-        pd.notna(NOPAT)
-        and pd.notna(DA)
-        and pd.notna(capex_outflow)
-    ):
-        FCFF = (
-            NOPAT
-            + DA
-            - capex_outflow
-            - delta_nwc
+        tax_rate = np.clip(
+            tax_rate,
+            0,
+            .40
         )
 
     # --------------------------------------------------------
-    # OLD FCF retained for quality analysis
+    # Price
+    # IMPORTANT:
+    # historical price is replaced later after history load.
     # --------------------------------------------------------
 
-    FCF = np.nan
-
-    if pd.notna(OCF) and pd.notna(CAPEX):
-
-        if CAPEX < 0:
-            FCF = OCF + CAPEX
-        else:
-            FCF = OCF - CAPEX
+    price = info_price
 
     # --------------------------------------------------------
-    # FCF GROWTH
+    # Ratios
     # --------------------------------------------------------
 
-    previous_fcf = np.nan
-
-    prev_ocf = previous_ttm_flow(
-        qcf,
-        [
-            'Operating Cash Flow',
-            'Total Cash From Operating Activities'
-        ],
-        cf
+    net_debt = (
+        D - C
+        if pd.notna(D) and pd.notna(C)
+        else np.nan
     )
 
-    prev_capex = previous_ttm_flow(
-        qcf,
-        [
-            'Capital Expenditure',
-            'Capital Expenditures'
-        ],
-        cf
-    )
+    invested_capital = np.nan
 
     if (
-        pd.notna(prev_ocf)
-        and pd.notna(prev_capex)
+        pd.notna(EQ)
+        and pd.notna(D)
     ):
-
-        if prev_capex < 0:
-            previous_fcf = prev_ocf + prev_capex
-        else:
-            previous_fcf = prev_ocf - prev_capex
-
-    FCF_GROWTH = growth_ttm(
-        FCF,
-        previous_fcf
-    )
-
-    # --------------------------------------------------------
-    # METRICS
-    # --------------------------------------------------------
+        invested_capital = (
+            EQ + D
+            - (C if pd.notna(C) else 0)
+        )
 
     metrics = {
-
-        # TTM core
-        'Revenue': R,
-        'Net Income': NI,
-        'Equity': EQ,
-        'Assets': AS,
-        'Debt': D,
-        'Cash': C,
-
-        'Operating Cash Flow': OCF,
-        'Capex': CAPEX,
-        'FCF': FCF,
-
-        # True FCFF
-        'EBIT': EBIT,
-        'EBITDA': EBITDA,
-        'D&A': DA,
-        'Tax Rate': tax_rate * 100,
-        'NOPAT': NOPAT,
-        'Delta NWC': delta_nwc,
-        'FCFF': FCFF,
-
-        'Gross Profit': GROSS,
-
-        'EPS': EPS,
-        'BVPS': BVPS,
-
-        'Shares': shares,
-        'Market Cap': mcap,
-        'Price': price,
-
-        'Working Capital': WORKING_CAPITAL,
-        'Retained Earnings': RETAINED,
-
-        # TTM Growth
-        'Revenue Growth': growth_ttm(
-            R,
-            R_prev
-        ),
-
-        'Net Income Growth': growth_ttm(
-            NI,
-            NI_prev
-        ),
-
-        'EPS Growth': np.nan,
-
-        # FCF Growth is independent
-        'FCF Growth': FCF_GROWTH
+        "Revenue": R,
+        "Net Income": NI,
+        "Equity": EQ,
+        "Assets": AS,
+        "Debt": D,
+        "Cash": C,
+        "Operating Cash Flow": OCF,
+        "Capex": CAPEX,
+        "FCF": FCF,
+        "EBIT": EBIT,
+        "EBITDA": EBITDA,
+        "Gross Profit": GROSS,
+        "D&A": D_AND_A,
+        "Working Capital": WORKING_CAPITAL,
+        "Previous Working Capital": previous_working_capital,
+        "Retained Earnings": RETAINED_EARNINGS,
+        "Shares": shares,
+        "Market Cap": market_cap,
+        "Price": price,
+        "EPS": EPS,
+        "Tax Rate": tax_rate,
+        "Revenue Growth": revenue_growth,
+        "Net Income Growth": ni_growth,
+        "EPS Growth": eps_growth
     }
 
-    # EPS growth using quarterly EPS when possible.
-    eps_series = clean_series(
-        find(
-            qinc,
-            ['Diluted EPS', 'Basic EPS']
-        )
+    metrics.update(
+        {
+            "Gross Margin":
+                GROSS / R * 100
+                if pd.notna(GROSS)
+                and pd.notna(R)
+                and R
+                else np.nan,
+
+            "EBITDA Margin":
+                EBITDA / R * 100
+                if pd.notna(EBITDA)
+                and pd.notna(R)
+                and R
+                else np.nan,
+
+            "Net Margin":
+                NI / R * 100
+                if pd.notna(NI)
+                and pd.notna(R)
+                and R
+                else np.nan,
+
+            "ROE":
+                NI / EQ * 100
+                if pd.notna(NI)
+                and pd.notna(EQ)
+                and EQ
+                else pct(
+                    info.get("returnOnEquity")
+                ),
+
+            "ROA":
+                NI / AS * 100
+                if pd.notna(NI)
+                and pd.notna(AS)
+                and AS
+                else pct(
+                    info.get("returnOnAssets")
+                ),
+
+            "ROIC":
+                EBIT / invested_capital * 100
+                if pd.notna(EBIT)
+                and pd.notna(invested_capital)
+                and invested_capital > 0
+                else np.nan,
+
+            "FCF Margin":
+                FCF / R * 100
+                if pd.notna(FCF)
+                and pd.notna(R)
+                and R
+                else np.nan,
+
+            "Debt/Equity":
+                D / EQ
+                if pd.notna(D)
+                and pd.notna(EQ)
+                and EQ
+                else (
+                    num(info.get("debtToEquity")) / 100
+                    if pd.notna(
+                        num(info.get("debtToEquity"))
+                    )
+                    else np.nan
+                ),
+
+            "Net Debt/EBITDA":
+                net_debt / EBITDA
+                if pd.notna(net_debt)
+                and pd.notna(EBITDA)
+                and EBITDA > 0
+                else np.nan,
+
+            "Current Ratio":
+                num(info.get("currentRatio")),
+
+            "P/E":
+                num(info.get("trailingPE")),
+
+            "P/B":
+                num(info.get("priceToBook")),
+
+            "EV/EBITDA":
+                num(info.get("enterpriseToEbitda")),
+
+            "Dividend Yield":
+                pct(info.get("dividendYield"))
+        }
     )
-
-    if eps_series is not None and len(eps_series) >= 8:
-
-        current_eps_ttm = num(
-            eps_series.iloc[:4].sum()
-        )
-
-        previous_eps_ttm = num(
-            eps_series.iloc[4:8].sum()
-        )
-
-        metrics['EPS Growth'] = growth_ttm(
-            current_eps_ttm,
-            previous_eps_ttm
-        )
-
-    else:
-
-        annual_eps = find(
-            inc,
-            ['Diluted EPS', 'Basic EPS']
-        )
-
-        metrics['EPS Growth'] = growth(
-            annual_eps
-        )
-
-    # --------------------------------------------------------
-    # RATIOS
-    # --------------------------------------------------------
-
-    metrics.update({
-
-        'Gross Margin':
-            GROSS / R * 100
-            if pd.notna(GROSS)
-            and pd.notna(R)
-            and R
-            else np.nan,
-
-        'EBITDA Margin':
-            EBITDA / R * 100
-            if pd.notna(EBITDA)
-            and pd.notna(R)
-            and R
-            else np.nan,
-
-        'Net Margin':
-            NI / R * 100
-            if pd.notna(NI)
-            and pd.notna(R)
-            and R
-            else np.nan,
-
-        'ROE':
-            NI / EQ * 100
-            if pd.notna(NI)
-            and pd.notna(EQ)
-            and EQ
-            else pct(info.get('returnOnEquity')),
-
-        'ROA':
-            NI / AS * 100
-            if pd.notna(NI)
-            and pd.notna(AS)
-            and AS
-            else pct(info.get('returnOnAssets')),
-
-        'ROIC':
-            EBIT /
-            (
-                EQ + D -
-                (C if pd.notna(C) else 0)
-            ) * 100
-            if pd.notna(EBIT)
-            and pd.notna(EQ)
-            and pd.notna(D)
-            and (
-                EQ + D -
-                (C if pd.notna(C) else 0)
-            )
-            else np.nan,
-
-        'FCF Margin':
-            FCF / R * 100
-            if pd.notna(FCF)
-            and pd.notna(R)
-            and R
-            else np.nan,
-
-        'FCFF Margin':
-            FCFF / R * 100
-            if pd.notna(FCFF)
-            and pd.notna(R)
-            and R
-            else np.nan,
-
-        'Debt/Equity':
-            D / EQ
-            if pd.notna(D)
-            and pd.notna(EQ)
-            and EQ
-            else (
-                num(info.get('debtToEquity')) / 100
-                if pd.notna(
-                    num(info.get('debtToEquity'))
-                )
-                else np.nan
-            ),
-
-        'Net Debt/EBITDA':
-            (D - C) / EBITDA
-            if pd.notna(D)
-            and pd.notna(C)
-            and pd.notna(EBITDA)
-            and EBITDA
-            else np.nan,
-
-        'Current Ratio':
-            num(info.get('currentRatio')),
-
-        'P/E':
-            (
-                price / EPS
-                if pd.notna(price)
-                and pd.notna(EPS)
-                and EPS > 0
-                else num(info.get('trailingPE'))
-            ),
-
-        'P/B':
-            (
-                price / BVPS
-                if pd.notna(price)
-                and pd.notna(BVPS)
-                and BVPS > 0
-                else num(info.get('priceToBook'))
-            ),
-
-        'EV/EBITDA':
-            num(info.get('enterpriseToEbitda')),
-
-        'Dividend Yield':
-            pct(info.get('dividendYield'))
-    })
 
     return (
         metrics,
         inc,
         bal,
         cf,
-        info,
-        last_price_date
+        info
     )
 
 
 # ============================================================
-# FORENSIC QUALITY
+# FORENSIC
 # ============================================================
 
 def piotroski(m, inc, bal, cf):
@@ -1183,53 +1143,45 @@ def piotroski(m, inc, bal, cf):
     points = 0
     tests = []
 
-    roe = num(m.get('ROE'))
-    ocf = num(m.get('Operating Cash Flow'))
-    NI = num(m.get('Net Income'))
-    margin = num(m.get('Net Margin'))
-    fcf = num(m.get('FCF'))
+    NI = num(m.get("Net Income"))
+    OCF = num(m.get("Operating Cash Flow"))
+    ROE = num(m.get("ROE"))
+    FCF = num(m.get("FCF"))
+    margin = num(m.get("Net Margin"))
+    de = num(m.get("Debt/Equity"))
+    rev_g = num(m.get("Revenue Growth"))
+    ni_g = num(m.get("Net Income Growth"))
+    eps_g = num(m.get("EPS Growth"))
 
     checks = [
-
-        ('صافي الربح موجب', NI > 0),
-
-        ('التدفق التشغيلي موجب', ocf > 0),
-
-        ('ROE موجب', roe > 0),
-
-        ('FCF موجب', fcf > 0),
-
-        ('هامش صافي موجب', margin > 0),
-
+        ("صافي الربح موجب", NI > 0),
+        ("التدفق التشغيلي موجب", OCF > 0),
+        ("ROE موجب", ROE > 0),
+        ("FCF موجب", FCF > 0),
+        ("هامش صافي موجب", margin > 0),
         (
-            'الدين/حقوق الملكية تحت السيطرة',
-            num(m.get('Debt/Equity')) < 1.5
+            "الدين/حقوق الملكية تحت السيطرة",
+            de < 1.5
         ),
-
         (
-            'نمو الإيرادات موجب',
-            num(m.get('Revenue Growth')) > 0
+            "نمو الإيرادات موجب",
+            rev_g > 0
         ),
-
         (
-            'نمو صافي الربح موجب',
-            num(m.get('Net Income Growth')) > 0
+            "نمو صافي الربح موجب",
+            ni_g > 0
         ),
-
         (
-            'نمو EPS موجب',
-            num(m.get('EPS Growth')) > 0
+            "نمو EPS موجب",
+            eps_g > 0
         )
     ]
 
-    for n, c in checks:
-
-        passed = int(bool(c))
-
-        points += passed
-
+    for name, condition in checks:
+        value = int(bool(condition))
+        points += value
         tests.append(
-            (n, passed)
+            (name, value)
         )
 
     return min(points, 9), tests
@@ -1238,114 +1190,120 @@ def piotroski(m, inc, bal, cf):
 def beneish(m):
 
     components = {
-        'DSRI': np.nan,
-        'GMI': np.nan,
-        'AQI': np.nan,
-        'SGI': np.nan,
-        'DEPI': np.nan,
-        'SGAI': np.nan,
-        'LVGI': np.nan,
-        'TATA': np.nan
+        "DSRI": np.nan,
+        "GMI": np.nan,
+        "AQI": np.nan,
+        "SGI": np.nan,
+        "DEPI": np.nan,
+        "SGAI": np.nan,
+        "LVGI": np.nan,
+        "TATA": np.nan
     }
 
     risk = 0
     available = 0
 
     revenue_growth = num(
-        m.get('Revenue Growth')
+        m.get("Revenue Growth")
+    )
+
+    net_margin = num(
+        m.get("Net Margin")
+    )
+
+    debt_equity = num(
+        m.get("Debt/Equity")
+    )
+
+    fcf_margin = num(
+        m.get("FCF Margin")
     )
 
     if pd.notna(revenue_growth):
-
         available += 1
-
         if revenue_growth > 80:
             risk += 1
 
-    net_margin = num(
-        m.get('Net Margin')
-    )
-
     if pd.notna(net_margin):
-
         available += 1
-
         if net_margin < 0:
             risk += 1
 
-    de = num(
-        m.get('Debt/Equity')
-    )
-
-    if pd.notna(de):
-
+    if pd.notna(debt_equity):
         available += 1
-
-        if de > 2:
+        if debt_equity > 2:
             risk += 1
 
-    fcf_margin = num(
-        m.get('FCF Margin')
-    )
-
     if pd.notna(fcf_margin):
-
         available += 1
-
         if fcf_margin < 0:
             risk += 1
 
     return {
-        'risk_flags': risk,
-        'available': available,
-        'components': components,
-        'status':
-            'مبدئي — يحتاج 2 سنوات كاملة من بنود القوائم'
+        "risk_flags": risk,
+        "available": available,
+        "components": components,
+        "status":
+            "مبدئي — لا تتوفر كل مكونات Beneish"
             if available < 4
-            else 'Screening'
+            else "Screening"
     }
 
 
 def altman(m, sec):
 
-    assets = num(m.get('Assets'))
+    assets = num(m.get("Assets"))
+    wc = num(m.get("Working Capital"))
+    retained = num(m.get("Retained Earnings"))
+    ebit = num(m.get("EBIT"))
+    market_cap = num(m.get("Market Cap"))
+    debt = num(m.get("Debt"))
+    revenue = num(m.get("Revenue"))
+
+    if (
+        sec == "Banks"
+        or sec == "Financial Services"
+    ):
+        return {
+            "score": np.nan,
+            "status": "Altman Z غير مناسب مباشرة للقطاع المالي"
+        }
 
     A = (
-        num(m.get('Working Capital')) / assets
-        if pd.notna(num(m.get('Working Capital')))
+        wc / assets
+        if pd.notna(wc)
         and pd.notna(assets)
         and assets
         else np.nan
     )
 
     B = (
-        num(m.get('Retained Earnings')) / assets
-        if pd.notna(num(m.get('Retained Earnings')))
+        retained / assets
+        if pd.notna(retained)
         and pd.notna(assets)
         and assets
         else np.nan
     )
 
     C = (
-        num(m.get('EBIT')) / assets
-        if pd.notna(num(m.get('EBIT')))
+        ebit / assets
+        if pd.notna(ebit)
         and pd.notna(assets)
         and assets
         else np.nan
     )
 
     D = (
-        num(m.get('Market Cap')) /
-        num(m.get('Debt'))
-        if pd.notna(num(m.get('Market Cap')))
-        and pd.notna(num(m.get('Debt')))
-        and num(m.get('Debt')) > 0
+        market_cap / debt
+        if pd.notna(market_cap)
+        and pd.notna(debt)
+        and debt > 0
         else np.nan
     )
 
     E = (
-        num(m.get('Revenue')) / assets
-        if pd.notna(num(m.get('Revenue')))
+        revenue / assets
+        if pd.notna(revenue)
         and pd.notna(assets)
         and assets
         else np.nan
@@ -1356,45 +1314,50 @@ def altman(m, sec):
         for x in [A, B, C, D, E]
     ):
         return {
-            'score': np.nan,
-            'status': 'بيانات غير كافية'
+            "score": np.nan,
+            "status": "بيانات غير كافية"
         }
 
     z = (
-        1.2 * A +
-        1.4 * B +
-        3.3 * C +
-        0.6 * D +
-        1.0 * E
+        1.2 * A
+        + 1.4 * B
+        + 3.3 * C
+        + .6 * D
+        + 1.0 * E
+    )
+
+    status = (
+        "منطقة خطر مرتفعة"
+        if z < 1.8
+        else
+        "منطقة مراقبة"
+        if z < 3
+        else
+        "منطقة سليمة"
     )
 
     return {
-        'score': z,
-        'status':
-            'منطقة خطر مرتفعة'
-            if z < 1.8
-            else 'منطقة مراقبة'
-            if z < 3
-            else 'منطقة سليمة'
+        "score": z,
+        "status": status
     }
 
 
 def earnings_quality(m):
 
     ocf = num(
-        m.get('Operating Cash Flow')
+        m.get("Operating Cash Flow")
     )
 
     ni = num(
-        m.get('Net Income')
+        m.get("Net Income")
     )
 
     fcf = num(
-        m.get('FCF')
+        m.get("FCF")
     )
 
     roe = num(
-        m.get('ROE')
+        m.get("ROE")
     )
 
     accrual = (
@@ -1405,7 +1368,7 @@ def earnings_quality(m):
         else np.nan
     )
 
-    score = 50
+    score = 50.0
 
     if pd.notna(accrual):
         score += np.clip(
@@ -1414,8 +1377,15 @@ def earnings_quality(m):
             25
         )
 
-    if pd.notna(fcf) and pd.notna(ni):
-        score += 15 if fcf > ni else -15
+    if (
+        pd.notna(fcf)
+        and pd.notna(ni)
+    ):
+        score += (
+            15
+            if fcf > ni
+            else -15
+        )
 
     if pd.notna(roe):
         score += np.clip(
@@ -1424,39 +1394,48 @@ def earnings_quality(m):
             20
         )
 
-    return float(
-        np.clip(score, 0, 100)
-    ), accrual
+    return (
+        float(np.clip(score, 0, 100)),
+        accrual
+    )
 
 
 def roic_quality(m):
 
-    roic = num(m.get('ROIC'))
-    fcfm = num(m.get('FCF Margin'))
-    growthv = num(m.get('Revenue Growth'))
+    roic = num(m.get("ROIC"))
+    fcfm = num(m.get("FCF Margin"))
+    growthv = num(m.get("Revenue Growth"))
 
-    values = [
+    components = []
 
-        np.clip(roic * 2.5, 0, 100)
-        if pd.notna(roic)
-        else np.nan,
+    if pd.notna(roic):
+        components.append(
+            np.clip(
+                roic * 2.5,
+                0,
+                100
+            )
+        )
 
-        np.clip(fcfm * 2, 0, 100)
-        if pd.notna(fcfm)
-        else np.nan,
+    if pd.notna(fcfm):
+        components.append(
+            np.clip(
+                fcfm * 2,
+                0,
+                100
+            )
+        )
 
-        np.clip(50 + growthv, 0, 100)
-        if pd.notna(growthv)
-        else np.nan
-    ]
+    if pd.notna(growthv):
+        components.append(
+            np.clip(
+                50 + growthv,
+                0,
+                100
+            )
+        )
 
-    score = np.nanmean(values)
-
-    return (
-        float(score)
-        if np.isfinite(score)
-        else np.nan
-    )
+    return safe_mean(components)
 
 
 # ============================================================
@@ -1469,25 +1448,32 @@ def dividend_engine(t, price):
 
         s = pd.to_numeric(
             t.dividends,
-            errors='coerce'
+            errors="coerce"
         ).dropna()
 
         s = s[s > 0]
 
         if s.empty:
-
             return {
-                'yield': np.nan,
-                'last': np.nan,
-                'count3y': 0,
-                'sustainability': np.nan
+                "yield": np.nan,
+                "last": np.nan,
+                "count3y": 0,
+                "sustainability": np.nan
             }
 
-        now = (
-            pd.Timestamp.now(tz=s.index.tz)
-            if getattr(s.index, 'tz', None)
-            else pd.Timestamp.now()
-        )
+        now = pd.Timestamp.now()
+
+        try:
+            if getattr(
+                s.index,
+                "tz",
+                None
+            ) is not None:
+                now = pd.Timestamp.now(
+                    tz=s.index.tz
+                )
+        except Exception:
+            pass
 
         d12 = s[
             s.index >= now - pd.Timedelta(days=365)
@@ -1497,11 +1483,14 @@ def dividend_engine(t, price):
             s.index >= now - pd.Timedelta(days=1095)
         ]
 
-        total = float(d12.sum())
+        total = float(
+            d12.sum()
+        )
 
         y = (
             total / price * 100
-            if price
+            if pd.notna(price)
+            and price
             else np.nan
         )
 
@@ -1516,61 +1505,184 @@ def dividend_engine(t, price):
         )
 
         return {
-            'yield': y,
-            'last': float(s.iloc[-1]),
-            'date': s.index[-1].strftime('%Y-%m-%d'),
-            'count3y': len(d3),
-            'sustainability': sustainability
+            "yield": y,
+            "last": float(s.iloc[-1]),
+            "date": s.index[-1].strftime("%Y-%m-%d"),
+            "count3y": len(d3),
+            "sustainability": sustainability
         }
 
     except Exception:
-
         return {
-            'yield': np.nan,
-            'last': np.nan,
-            'count3y': 0,
-            'sustainability': np.nan
+            "yield": np.nan,
+            "last": np.nan,
+            "count3y": 0,
+            "sustainability": np.nan
         }
 
 
 # ============================================================
-# TRUE FCFF DCF
+# VALUATION V2
 # ============================================================
 
-def fcff_dcf_scenario(
+def get_actual_price(m, history):
+
+    hist_price = get_latest_close(history)
+
+    if pd.notna(hist_price) and hist_price > 0:
+        return hist_price
+
+    info_price = num(
+        m.get("Price")
+    )
+
+    return info_price
+
+
+def fcff_base(m):
+
+    EBIT = num(m.get("EBIT"))
+    tax_rate = num(m.get("Tax Rate"))
+    D_A = num(m.get("D&A"))
+    CAPEX = num(m.get("Capex"))
+    WC = num(m.get("Working Capital"))
+    PREV_WC = num(
+        m.get("Previous Working Capital")
+    )
+
+    if pd.isna(EBIT):
+        return np.nan
+
+    if pd.isna(tax_rate):
+        tax_rate = .22
+
+    tax_rate = np.clip(
+        tax_rate,
+        0,
+        .40
+    )
+
+    nopat = EBIT * (1 - tax_rate)
+
+    if pd.isna(D_A):
+        D_A = 0
+
+    if pd.isna(CAPEX):
+        return np.nan
+
+    # Yahoo can report Capex as negative or positive.
+    capex_abs = abs(CAPEX)
+
+    if (
+        pd.notna(WC)
+        and pd.notna(PREV_WC)
+    ):
+        delta_wc = WC - PREV_WC
+    else:
+        delta_wc = 0
+
+    fcff = (
+        nopat
+        + D_A
+        - capex_abs
+        - delta_wc
+    )
+
+    return num(fcff)
+
+
+def scenario_growths(
     m,
-    years=5,
-    wacc=0.14,
-    tg=0.04,
-    growth_override=None,
-    name='Base'
+    scenario="base"
 ):
-    """
-    True FCFF framework:
 
-    FCFF =
-        NOPAT
-        + D&A
-        - Capex
-        - Delta NWC
+    revenue_growth = num(
+        m.get("Revenue Growth")
+    )
 
-    Then:
-        Enterprise Value =
-            PV(FCFF) + PV(Terminal Value)
+    fcf_margin = num(
+        m.get("FCF Margin")
+    )
 
-    Equity Value =
-        Enterprise Value
-        - Debt
-        + Cash
+    if pd.isna(revenue_growth):
+        revenue_growth = 8.0
 
-    Per share =
-        Equity Value / Shares
-    """
+    # More realistic normalized starting growth.
+    revenue_growth = np.clip(
+        revenue_growth,
+        -10,
+        30
+    )
 
-    fcff = num(m.get('FCFF'))
-    shares = num(m.get('Shares'))
-    debt = num(m.get('Debt'))
-    cash = num(m.get('Cash'))
+    if scenario == "conservative":
+
+        first = max(
+            3.0,
+            min(
+                12.0,
+                revenue_growth * .55
+            )
+        )
+
+        terminal = 3.0
+
+    elif scenario == "optimistic":
+
+        first = np.clip(
+            revenue_growth * 1.05,
+            5,
+            25
+        )
+
+        terminal = 4.0
+
+    else:
+
+        first = np.clip(
+            revenue_growth * .75,
+            4,
+            18
+        )
+
+        terminal = 3.5
+
+    growths = []
+
+    for i in range(5):
+
+        fade = i / 4.0
+
+        g = (
+            first
+            + (terminal - first) * fade
+        )
+
+        growths.append(
+            g / 100.0
+        )
+
+    return growths, terminal / 100.0
+
+
+def fcff_dcf(
+    m,
+    scenario="base",
+    years=5
+):
+
+    fcff = fcff_base(m)
+
+    shares = num(
+        m.get("Shares")
+    )
+
+    debt = num(
+        m.get("Debt")
+    )
+
+    cash = num(
+        m.get("Cash")
+    )
 
     if (
         pd.isna(fcff)
@@ -1578,429 +1690,387 @@ def fcff_dcf_scenario(
         or pd.isna(shares)
         or shares <= 0
     ):
-
         return {
-            'value': np.nan,
-            'enterprise': np.nan,
-            'equity': np.nan,
-            'status': 'True FCFF غير متاح',
-            'scenario': name
+            "value": np.nan,
+            "enterprise": np.nan,
+            "status": "FCFF غير متاح"
         }
 
-    # --------------------------------------------------------
-    # Growth assumptions
-    # --------------------------------------------------------
+    if pd.isna(debt):
+        debt = 0
 
-    revenue_growth = num(
-        m.get('Revenue Growth')
-    )
+    if pd.isna(cash):
+        cash = 0
 
-    fcf_growth = num(
-        m.get('FCF Growth')
-    )
+    if scenario == "conservative":
 
-    # Use independent FCF growth as primary signal.
-    if growth_override is not None:
+        wacc = .16
 
-        g0 = growth_override
+    elif scenario == "optimistic":
 
-    elif pd.notna(fcf_growth):
-
-        g0 = fcf_growth / 100
-
-    elif pd.notna(revenue_growth):
-
-        g0 = revenue_growth / 100
+        wacc = .125
 
     else:
 
-        g0 = 0.06
+        wacc = .14
 
-    # Conservative limits.
-    g0 = np.clip(
-        g0,
-        -0.05,
-        0.20
+    growths, tg = scenario_growths(
+        m,
+        scenario
     )
 
-    # Growth fades toward terminal growth.
-    growths = []
-
-    for i in range(years):
-
-        fade = i / max(years - 1, 1)
-
-        g = (
-            g0 * (1 - fade * .65)
-            + tg * (fade * .65)
-        )
-
-        g = max(
-            g,
-            tg
-        )
-
-        growths.append(g)
-
-    # --------------------------------------------------------
-    # Forecast
-    # --------------------------------------------------------
+    # Terminal growth must stay below WACC.
+    tg = min(
+        tg,
+        wacc - .02
+    )
 
     pv = 0.0
-    current_fcff = fcff
+    current = fcff
 
-    for year, gr in enumerate(
+    for year, growth_rate in enumerate(
         growths,
         start=1
     ):
 
-        current_fcff *= (
-            1 + gr
+        current *= (
+            1 + growth_rate
         )
 
         pv += (
-            current_fcff /
-            ((1 + wacc) ** year)
+            current
+            / ((1 + wacc) ** year)
         )
 
-    # Terminal value
-    denominator = wacc - tg
-
-    if denominator <= 0:
-        return {
-            'value': np.nan,
-            'enterprise': np.nan,
-            'equity': np.nan,
-            'status': 'WACC يجب أن يكون أكبر من Terminal Growth',
-            'scenario': name
-        }
-
     terminal = (
-        current_fcff *
-        (1 + tg) /
-        denominator
+        current
+        * (1 + tg)
+        / (wacc - tg)
     )
 
     terminal_pv = (
-        terminal /
-        ((1 + wacc) ** years)
+        terminal
+        / ((1 + wacc) ** years)
     )
 
     enterprise = (
-        pv +
-        terminal_pv
+        pv
+        + terminal_pv
     )
 
-    equity = (
-        enterprise -
-        (debt if pd.notna(debt) else 0)
-        +
-        (cash if pd.notna(cash) else 0)
+    equity_value = (
+        enterprise
+        - debt
+        + cash
     )
 
-    value = (
+    per_share = (
+        equity_value / shares
+    )
+
+    return {
+        "value": per_share,
+        "enterprise": enterprise,
+        "equity_value": equity_value,
+        "fcff": fcff,
+        "wacc": wacc * 100,
+        "terminal_growth": tg * 100,
+        "status": "FCFF DCF"
+    }
+
+
+def relative_valuation(
+    m,
+    sec
+):
+
+    price = num(
+        m.get("Price")
+    )
+
+    eps = num(
+        m.get("EPS")
+    )
+
+    equity = num(
+        m.get("Equity")
+    )
+
+    shares = num(
+        m.get("Shares")
+    )
+
+    # Actual book value per share.
+    bvps = (
         equity / shares
+        if pd.notna(equity)
+        and pd.notna(shares)
+        and shares > 0
+        else np.nan
     )
 
-    return {
-        'value': value,
-        'enterprise': enterprise,
-        'equity': equity,
-        'status': 'True FCFF DCF',
-        'scenario': name,
-        'wacc': wacc,
-        'terminal_growth': tg,
-        'initial_growth': g0,
-        'fcff': fcff
+    pe = num(
+        m.get("P/E")
+    )
+
+    pb = num(
+        m.get("P/B")
+    )
+
+    # Conservative reference ranges.
+    peer_pe = {
+        "Banks": 9.5,
+        "Financial Services": 11,
+        "Real Estate": 12,
+        "Healthcare": 15,
+        "Telecom & Technology": 14,
+        "Energy & Petrochemicals": 9,
+        "Consumer": 13,
+        "Construction & Engineering": 11,
+        "Industrial & Materials": 11,
+        "General": 12
     }
 
-
-# ============================================================
-# 3 SCENARIO VALUATION
-# ============================================================
-
-def dcf_three_scenarios(m):
-
-    # --------------------------------------------------------
-    # Conservative
-    # --------------------------------------------------------
-
-    conservative = fcff_dcf_scenario(
-        m,
-        years=5,
-        wacc=.15,
-        tg=.03,
-        name='Conservative'
-    )
-
-    # --------------------------------------------------------
-    # Base
-    # --------------------------------------------------------
-
-    base = fcff_dcf_scenario(
-        m,
-        years=5,
-        wacc=.13,
-        tg=.04,
-        name='Base'
-    )
-
-    # --------------------------------------------------------
-    # Optimistic
-    # --------------------------------------------------------
-
-    optimistic = fcff_dcf_scenario(
-        m,
-        years=5,
-        wacc=.12,
-        tg=.045,
-        name='Optimistic'
-    )
-
-    values = [
-        conservative.get('value'),
-        base.get('value'),
-        optimistic.get('value')
-    ]
-
-    valid = [
-        x for x in values
-        if pd.notna(x) and x > 0
-    ]
-
-    # Base is the main fair-value anchor.
-    fair_dcf = (
-        base.get('value')
-        if pd.notna(base.get('value'))
-        and base.get('value') > 0
-        else (
-            float(np.nanmedian(valid))
-            if valid
-            else np.nan
-        )
-    )
-
-    return {
-        'Conservative DCF':
-            conservative.get('value'),
-
-        'Base DCF':
-            base.get('value'),
-
-        'Optimistic DCF':
-            optimistic.get('value'),
-
-        'DCF Fair Value':
-            fair_dcf,
-
-        'Conservative Detail':
-            conservative,
-
-        'Base Detail':
-            base,
-
-        'Optimistic Detail':
-            optimistic
+    peer_pb = {
+        "Banks": 1.35,
+        "Financial Services": 1.5,
+        "Real Estate": 1.4,
+        "Healthcare": 1.8,
+        "Telecom & Technology": 1.8,
+        "Energy & Petrochemicals": 1.3,
+        "Consumer": 1.6,
+        "Construction & Engineering": 1.5,
+        "Industrial & Materials": 1.5,
+        "General": 1.5
     }
 
-
-# ============================================================
-# RELATIVE VALUATION
-# ============================================================
-
-def relative_valuation(m, sector):
-
-    pe = num(m.get('P/E'))
-    pb = num(m.get('P/B'))
-
-    price = num(m.get('Price'))
-    eps = num(m.get('EPS'))
-    bv = num(m.get('BVPS'))
-
-    pe_ref = {
-        'Banks': 10,
-        'Financial Services': 11,
-        'Real Estate': 12,
-        'Healthcare': 15,
-        'Telecom & Technology': 14,
-        'Energy & Petrochemicals': 9,
-        'Consumer': 13,
-        'Construction & Engineering': 11,
-        'Industrial & Materials': 11
-    }.get(
-        sector,
+    pe_ref = peer_pe.get(
+        sec,
         12
     )
 
-    pb_ref = (
-        1.4
-        if sector == 'Banks'
-        else 1.5
+    pb_ref = peer_pb.get(
+        sec,
+        1.5
     )
 
-    vals = []
+    values = []
 
-    pe_value = np.nan
-    pb_value = np.nan
-
+    # Earnings valuation.
     if (
         pd.notna(eps)
         and eps > 0
     ):
+        values.append(
+            eps * pe_ref
+        )
 
-        pe_value = eps * pe_ref
-        vals.append(pe_value)
+    # Book valuation.
+    if (
+        pd.notna(bvps)
+        and bvps > 0
+    ):
+        values.append(
+            bvps * pb_ref
+        )
+
+    # Current market multiple diagnostics.
+    earnings_upside = np.nan
+    book_upside = np.nan
 
     if (
-        pd.notna(bv)
-        and bv > 0
+        pd.notna(price)
+        and price > 0
+        and pd.notna(eps)
+        and eps > 0
     ):
+        earnings_upside = (
+            eps * pe_ref / price - 1
+        ) * 100
 
-        pb_value = bv * pb_ref
-        vals.append(pb_value)
+    if (
+        pd.notna(price)
+        and price > 0
+        and pd.notna(bvps)
+        and bvps > 0
+    ):
+        book_upside = (
+            bvps * pb_ref / price - 1
+        ) * 100
 
     return {
-        'value':
-            float(np.nanmedian(vals))
-            if vals
-            else np.nan,
-
-        'PE Fair Value':
-            pe_value,
-
-        'PB Fair Value':
-            pb_value,
-
-        'pe_ref':
-            pe_ref,
-
-        'pb_ref':
-            pb_ref,
-
-        'methods':
-            len(vals)
+        "value": safe_median(values),
+        "PE Fair Value": (
+            eps * pe_ref
+            if pd.notna(eps)
+            and eps > 0
+            else np.nan
+        ),
+        "PB Fair Value": (
+            bvps * pb_ref
+            if pd.notna(bvps)
+            and bvps > 0
+            else np.nan
+        ),
+        "PE Reference": pe_ref,
+        "PB Reference": pb_ref,
+        "BVPS": bvps,
+        "Current PE": pe,
+        "Current PB": pb,
+        "PE Upside %": earnings_upside,
+        "PB Upside %": book_upside,
+        "methods": len(values)
     }
 
 
-# ============================================================
-# NORMALIZED EARNINGS VALUE
-# ============================================================
-
-def normalized_earnings_value(m, sector):
-
-    eps = num(
-        m.get('EPS')
-    )
-
-    if pd.isna(eps) or eps <= 0:
-        return np.nan
-
-    pe_ref = {
-        'Banks': 10,
-        'Financial Services': 11,
-        'Real Estate': 12,
-        'Healthcare': 15,
-        'Telecom & Technology': 14,
-        'Energy & Petrochemicals': 9,
-        'Consumer': 13,
-        'Construction & Engineering': 11,
-        'Industrial & Materials': 11
-    }.get(
-        sector,
-        12
-    )
-
-    return eps * pe_ref
-
-
-# ============================================================
-# COMPLETE VALUATION ENGINE
-# ============================================================
-
-def valuation_engine(m, sector):
+def valuation_engine(
+    m,
+    sec
+):
 
     price = num(
-        m.get('Price')
+        m.get("Price")
     )
 
-    dcf = dcf_three_scenarios(m)
+    is_financial = sec in [
+        "Banks",
+        "Financial Services"
+    ]
+
+    conservative = fcff_dcf(
+        m,
+        "conservative"
+    )
+
+    base = fcff_dcf(
+        m,
+        "base"
+    )
+
+    optimistic = fcff_dcf(
+        m,
+        "optimistic"
+    )
 
     relative = relative_valuation(
         m,
-        sector
+        sec
     )
 
-    normalized = normalized_earnings_value(
-        m,
-        sector
+    dcf_values = [
+        conservative.get("value"),
+        base.get("value"),
+        optimistic.get("value")
+    ]
+
+    dcf_valid = [
+        x
+        for x in dcf_values
+        if pd.notna(x) and x > 0
+    ]
+
+    dcf_base = base.get(
+        "value"
     )
 
-    base_dcf = num(
-        dcf.get('Base DCF')
-    )
-
-    relative_value = num(
-        relative.get('value')
+    relative_value = relative.get(
+        "value"
     )
 
     # --------------------------------------------------------
-    # Fair Value
-    #
-    # Base DCF is the primary intrinsic anchor.
-    # Relative value is a secondary confirmation.
-    #
-    # This avoids the old problem where median of two values
-    # became a simple average and pulled fair value arbitrarily.
+    # Financial companies:
+    # P/E + P/B are more relevant.
+    # Industrial/non-financial:
+    # DCF gets higher weight.
     # --------------------------------------------------------
 
-    if (
-        pd.notna(base_dcf)
-        and base_dcf > 0
-        and pd.notna(relative_value)
-        and relative_value > 0
-    ):
+    if is_financial:
 
-        fair = (
-            base_dcf * .70 +
-            relative_value * .30
+        candidates = []
+
+        if pd.notna(relative_value):
+            candidates.append(
+                relative_value
+            )
+
+        fair = safe_median(
+            candidates
         )
 
-    elif (
-        pd.notna(base_dcf)
-        and base_dcf > 0
-    ):
-
-        fair = base_dcf
-
-    elif (
-        pd.notna(relative_value)
-        and relative_value > 0
-    ):
-
-        fair = relative_value
-
-    elif (
-        pd.notna(normalized)
-        and normalized > 0
-    ):
-
-        fair = normalized
+        method = (
+            "Relative P/E + P/B"
+        )
 
     else:
 
-        fair = np.nan
+        candidates = []
 
-    conservative = num(
-        dcf.get('Conservative DCF')
-    )
+        if pd.notna(dcf_base):
+            candidates.append(
+                dcf_base
+            )
 
-    optimistic = num(
-        dcf.get('Optimistic DCF')
-    )
+        if pd.notna(relative_value):
+            candidates.append(
+                relative_value
+            )
+
+        if (
+            pd.notna(dcf_base)
+            and pd.notna(relative_value)
+        ):
+            # DCF gets 65%, relative 35%.
+            fair = (
+                dcf_base * .65
+                + relative_value * .35
+            )
+        else:
+            fair = safe_median(
+                candidates
+            )
+
+        method = (
+            "65% FCFF DCF + 35% Relative"
+        )
 
     # --------------------------------------------------------
-    # Safety margins
+    # Fair value range
     # --------------------------------------------------------
+
+    range_values = [
+        conservative.get("value"),
+        base.get("value"),
+        optimistic.get("value"),
+        relative_value
+    ]
+
+    range_values = [
+        x
+        for x in range_values
+        if pd.notna(x)
+        and x > 0
+    ]
+
+    if range_values:
+
+        low = float(
+            np.percentile(
+                range_values,
+                25
+            )
+        )
+
+        high = float(
+            np.percentile(
+                range_values,
+                75
+            )
+        )
+
+    else:
+
+        low = np.nan
+        high = np.nan
 
     buy20 = (
         fair * .80
@@ -2022,55 +2092,36 @@ def valuation_engine(m, sector):
         else np.nan
     )
 
+    # Conservative upside.
+    conservative_upside = (
+        (low / price - 1) * 100
+        if pd.notna(low)
+        and pd.notna(price)
+        and price > 0
+        else np.nan
+    )
+
     return {
-
-        'DCF/FCFF':
-            base_dcf,
-
-        'Conservative DCF':
-            conservative,
-
-        'Base DCF':
-            base_dcf,
-
-        'Optimistic DCF':
-            optimistic,
-
-        'Relative':
-            relative_value,
-
-        'Normalized Earnings':
-            normalized,
-
-        'Fair Value':
-            fair,
-
-        'Buy 20% MOS':
-            buy20,
-
-        'Strong Buy 30% MOS':
-            buy30,
-
-        'Upside %':
-            upside,
-
-        'DCF Low':
-            conservative,
-
-        'DCF High':
-            optimistic,
-
-        'PE Fair Value':
-            relative.get('PE Fair Value'),
-
-        'PB Fair Value':
-            relative.get('PB Fair Value'),
-
-        'PE Reference':
-            relative.get('pe_ref'),
-
-        'PB Reference':
-            relative.get('pb_ref')
+        "DCF Conservative": conservative.get("value"),
+        "DCF Base": dcf_base,
+        "DCF Optimistic": optimistic.get("value"),
+        "Relative": relative_value,
+        "PE Fair Value": relative.get("PE Fair Value"),
+        "PB Fair Value": relative.get("PB Fair Value"),
+        "Fair Value Low": low,
+        "Fair Value High": high,
+        "Fair Value": fair,
+        "Buy 20% MOS": buy20,
+        "Strong Buy 30% MOS": buy30,
+        "Upside %": upside,
+        "Conservative Upside %": conservative_upside,
+        "Valuation Method": method,
+        "FCFF Base": base.get("fcff"),
+        "WACC Base": base.get("wacc"),
+        "Terminal Growth Base": base.get("terminal_growth"),
+        "PE Reference": relative.get("PE Reference"),
+        "PB Reference": relative.get("PB Reference"),
+        "BVPS": relative.get("BVPS")
     }
 
 
@@ -2083,7 +2134,7 @@ def technical(df):
     if (
         df is None
         or df.empty
-        or 'Close' not in df
+        or "Close" not in df
         or len(df) < 220
     ):
         return {}
@@ -2091,23 +2142,26 @@ def technical(df):
     d = df.copy()
 
     close = pd.to_numeric(
-        d['Close'],
-        errors='coerce'
+        d["Close"],
+        errors="coerce"
     ).dropna()
 
+    if len(close) < 220:
+        return {}
+
     high = pd.to_numeric(
-        d['High'],
-        errors='coerce'
+        d["High"],
+        errors="coerce"
     ).reindex(close.index)
 
     low = pd.to_numeric(
-        d['Low'],
-        errors='coerce'
+        d["Low"],
+        errors="coerce"
     ).reindex(close.index)
 
     vol = pd.to_numeric(
-        d['Volume'],
-        errors='coerce'
+        d["Volume"],
+        errors="coerce"
     ).reindex(close.index)
 
     ema20 = close.ewm(
@@ -2127,31 +2181,34 @@ def technical(df):
 
     delta = close.diff()
 
-    gain = delta.clip(
-        lower=0
-    ).ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean()
+    gain = (
+        delta
+        .clip(lower=0)
+        .ewm(
+            alpha=1 / 14,
+            adjust=False
+        )
+        .mean()
+    )
 
     loss = (
-        -delta.clip(lower=None, upper=0)
-    ).ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean()
+        -delta
+        .clip(upper=0)
+        .ewm(
+            alpha=1 / 14,
+            adjust=False
+        )
+        .mean()
+    )
+
+    rs = (
+        gain
+        / loss.replace(0, np.nan)
+    )
 
     rsi = (
-        100 -
-        100 /
-        (
-            1 +
-            gain /
-            loss.replace(
-                0,
-                np.nan
-            )
-        )
+        100
+        - 100 / (1 + rs)
     )
 
     macd = (
@@ -2166,7 +2223,7 @@ def technical(df):
         ).mean()
     )
 
-    sig = macd.ewm(
+    signal = macd.ewm(
         span=9,
         adjust=False
     ).mean()
@@ -2184,36 +2241,69 @@ def technical(df):
         14
     ).mean()
 
-    vol_mean = (
-        vol.rolling(20).mean().iloc[-1]
+    volume_avg = vol.rolling(
+        20
+    ).mean()
+
+    last_volume_avg = (
+        volume_avg.iloc[-1]
     )
 
     vr = (
-        vol.iloc[-1] / vol_mean
-        if pd.notna(vol_mean)
-        and vol_mean
+        vol.iloc[-1] / last_volume_avg
+        if pd.notna(last_volume_avg)
+        and last_volume_avg
         else np.nan
     )
 
-    c = float(close.iloc[-1])
+    c = float(
+        close.iloc[-1]
+    )
 
-    e20 = float(ema20.iloc[-1])
-    e50 = float(ema50.iloc[-1])
-    e200 = float(ema200.iloc[-1])
+    e20 = float(
+        ema20.iloc[-1]
+    )
+
+    e50 = float(
+        ema50.iloc[-1]
+    )
+
+    e200 = float(
+        ema200.iloc[-1]
+    )
+
+    rsi_last = num(
+        rsi.iloc[-1]
+    )
+
+    macd_last = num(
+        macd.iloc[-1]
+    )
+
+    signal_last = num(
+        signal.iloc[-1]
+    )
 
     flags = [
         c > e20,
         c > e50,
         c > e200,
-        rsi.iloc[-1] > 50,
-        macd.iloc[-1] > sig.iloc[-1],
-        vr >= 1 if pd.notna(vr) else False
+        rsi_last > 50 if pd.notna(rsi_last) else False,
+        (
+            macd_last > signal_last
+            if pd.notna(macd_last)
+            and pd.notna(signal_last)
+            else False
+        ),
+        vr >= 1
+        if pd.notna(vr)
+        else False
     ]
 
     score = (
-        sum(flags) /
-        6 *
-        100
+        sum(flags)
+        / len(flags)
+        * 100
     )
 
     support = float(
@@ -2224,12 +2314,15 @@ def technical(df):
         close.tail(20).max()
     )
 
+    atr_last = num(
+        atr.iloc[-1]
+    )
+
     stop = max(
         support,
-        c -
-        (
-            atr.iloc[-1] * 2
-            if pd.notna(atr.iloc[-1])
+        c - (
+            atr_last * 2
+            if pd.notna(atr_last)
             else c * .08
         )
     )
@@ -2240,47 +2333,27 @@ def technical(df):
     )
 
     return {
-
-        'score': score,
-        'price': c,
-
-        'rsi':
-            float(rsi.iloc[-1]),
-
-        'macd':
-            float(macd.iloc[-1]),
-
-        'signal':
-            float(sig.iloc[-1]),
-
-        'atr_pct':
-            float(
-                atr.iloc[-1] /
-                c *
-                100
-            )
-            if pd.notna(atr.iloc[-1])
+        "score": score,
+        "price": c,
+        "rsi": rsi_last,
+        "macd": macd_last,
+        "signal": signal_last,
+        "atr_pct":
+            atr_last / c * 100
+            if pd.notna(atr_last)
+            and c
             else np.nan,
-
-        'volume_ratio':
-            float(vr)
-            if pd.notna(vr)
-            else np.nan,
-
-        'ema20': e20,
-        'ema50': e50,
-        'ema200': e200,
-
-        'support': support,
-        'resistance': resistance,
-
-        'stop': stop,
-        'target1': target,
-
-        'last_date':
-            close.index[-1].strftime(
-                '%Y-%m-%d'
-            )
+        "volume_ratio": vr,
+        "ema20": e20,
+        "ema50": e50,
+        "ema200": e200,
+        "support": support,
+        "resistance": resistance,
+        "stop": stop,
+        "target1": target,
+        "last_date": get_last_date(
+            df
+        )
     }
 
 
@@ -2300,14 +2373,20 @@ def backtest(
         or len(df) < 260
     ):
         return {
-            'trades': 0,
-            'status': 'بيانات غير كافية'
+            "trades": 0,
+            "status": "بيانات غير كافية"
         }
 
     close = pd.to_numeric(
-        df['Close'],
-        errors='coerce'
+        df["Close"],
+        errors="coerce"
     ).dropna()
+
+    if len(close) < 260:
+        return {
+            "trades": 0,
+            "status": "بيانات غير كافية"
+        }
 
     ema = close.ewm(
         span=20,
@@ -2316,27 +2395,33 @@ def backtest(
 
     delta = close.diff()
 
-    gain = delta.clip(
-        lower=0
-    ).ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean()
+    gain = (
+        delta
+        .clip(lower=0)
+        .ewm(
+            alpha=1 / 14,
+            adjust=False
+        )
+        .mean()
+    )
 
     loss = (
-        -delta.clip(lower=None, upper=0)
-    ).ewm(
-        alpha=1 / 14,
-        adjust=False
-    ).mean()
+        -delta
+        .clip(upper=0)
+        .ewm(
+            alpha=1 / 14,
+            adjust=False
+        )
+        .mean()
+    )
 
     rsi = (
-        100 -
-        100 /
-        (
-            1 +
-            gain /
-            loss.replace(
+        100
+        - 100
+        / (
+            1
+            + gain
+            / loss.replace(
                 0,
                 np.nan
             )
@@ -2346,27 +2431,39 @@ def backtest(
     returns = []
 
     in_pos = False
-    entry = 0
+    entry = np.nan
 
     for i in range(
         220,
         len(close)
     ):
 
-        c = close.iloc[i]
+        c = float(
+            close.iloc[i]
+        )
+
+        current_ema = num(
+            ema.iloc[i]
+        )
+
+        current_rsi = num(
+            rsi.iloc[i]
+        )
 
         if (
             not in_pos
-            and c > ema.iloc[i]
-            and rsi.iloc[i] > 52
+            and pd.notna(current_ema)
+            and pd.notna(current_rsi)
+            and c > current_ema
+            and current_rsi > 52
         ):
 
             entry = (
-                float(c) *
-                (
-                    1 +
-                    slippage +
-                    commission
+                c
+                * (
+                    1
+                    + slippage
+                    + commission
                 )
             )
 
@@ -2375,32 +2472,42 @@ def backtest(
         elif (
             in_pos
             and (
-                c < ema.iloc[i]
-                or rsi.iloc[i] < 48
+                c < current_ema
+                or (
+                    pd.notna(current_rsi)
+                    and current_rsi < 48
+                )
             )
         ):
 
-            exitp = (
-                float(c) *
-                (
-                    1 -
-                    slippage -
-                    commission
+            exit_price = (
+                c
+                * (
+                    1
+                    - slippage
+                    - commission
                 )
             )
 
-            returns.append(
-                exitp / entry - 1
-            )
+            if entry > 0:
+                returns.append(
+                    exit_price / entry - 1
+                )
 
             in_pos = False
 
-    if in_pos:
+    if in_pos and entry > 0:
+
+        final_exit = float(
+            close.iloc[-1]
+        ) * (
+            1
+            - slippage
+            - commission
+        )
 
         returns.append(
-            float(close.iloc[-1]) /
-            entry -
-            1
+            final_exit / entry - 1
         )
 
     r = np.array(
@@ -2411,10 +2518,9 @@ def backtest(
     trades = len(r)
 
     if not trades:
-
         return {
-            'trades': 0,
-            'status': 'لا توجد صفقات'
+            "trades": 0,
+            "status": "لا توجد صفقات"
         }
 
     curve = np.cumprod(
@@ -2430,45 +2536,44 @@ def backtest(
     ) / peak * 100
 
     win = (
-        (r > 0).mean() *
-        100
+        (r > 0).mean()
+        * 100
     )
 
     profit = (
         curve[-1] - 1
     ) * 100
 
-    if (r < 0).any():
+    negative = r[r < 0]
+    positive = r[r > 0]
 
+    if len(negative):
         pf = (
-            r[r > 0].sum() /
-            abs(r[r < 0].sum())
+            positive.sum()
+            / abs(negative.sum())
         )
-
     else:
-
         pf = np.inf
 
-    exp = (
-        r.mean() *
-        100
+    expectancy = (
+        r.mean() * 100
     )
 
     sharpe = (
-        r.mean() /
-        r.std() *
-        np.sqrt(trades)
+        r.mean()
+        / r.std()
+        * np.sqrt(trades)
         if r.std() > 0
         else np.nan
     )
 
-    # --------------------------------------------------------
-    # Monte Carlo
-    # --------------------------------------------------------
-
-    mc_runs = max(
-        int(mc_runs),
-        10
+    # Limit Monte Carlo to sensible values.
+    mc_runs = int(
+        np.clip(
+            mc_runs,
+            50,
+            5000
+        )
     )
 
     rng = np.random.default_rng(
@@ -2478,7 +2583,9 @@ def backtest(
     terminals = []
     dds = []
 
-    for _ in range(mc_runs):
+    for _ in range(
+        mc_runs
+    ):
 
         sample = rng.choice(
             r,
@@ -2486,22 +2593,27 @@ def backtest(
             replace=True
         )
 
-        c = np.cumprod(
+        curve_mc = np.cumprod(
             1 + sample
         )
 
-        p = np.maximum.accumulate(
-            c
+        peak_mc = np.maximum.accumulate(
+            curve_mc
         )
 
+        dd_mc = (
+            peak_mc - curve_mc
+        ) / peak_mc * 100
+
         terminals.append(
-            (c[-1] - 1) * 100
+            (curve_mc[-1] - 1)
+            * 100
         )
 
         dds.append(
-            np.max(
-                (p - c) / p
-            ) * 100
+            np.max(dd_mc)
+            if len(dd_mc)
+            else 0
         )
 
     terminals = np.array(
@@ -2513,69 +2625,45 @@ def backtest(
     )
 
     return {
-
-        'trades':
-            trades,
-
-        'win_rate':
-            float(win),
-
-        'return':
-            float(profit),
-
-        'max_dd':
-            float(dd.max()),
-
-        'pf':
-            float(pf),
-
-        'expectancy':
-            float(exp),
-
-        'sharpe':
-            float(sharpe),
-
-        'mc5':
-            float(
-                np.percentile(
-                    terminals,
-                    5
-                )
-            ),
-
-        'mc50':
-            float(
-                np.percentile(
-                    terminals,
-                    50
-                )
-            ),
-
-        'mc95':
-            float(
-                np.percentile(
-                    terminals,
-                    95
-                )
-            ),
-
-        'mc_profit_prob':
-            float(
-                np.mean(
-                    terminals > 0
-                ) * 100
-            ),
-
-        'mc_dd95':
-            float(
-                np.percentile(
-                    dds,
-                    95
-                )
-            ),
-
-        'status':
-            'تم'
+        "trades": trades,
+        "win_rate": win,
+        "return": profit,
+        "max_dd": float(
+            dd.max()
+        ),
+        "pf": float(pf),
+        "expectancy": expectancy,
+        "sharpe": sharpe,
+        "mc5": float(
+            np.percentile(
+                terminals,
+                5
+            )
+        ),
+        "mc50": float(
+            np.percentile(
+                terminals,
+                50
+            )
+        ),
+        "mc95": float(
+            np.percentile(
+                terminals,
+                95
+            )
+        ),
+        "mc_profit_prob": float(
+            np.mean(
+                terminals > 0
+            ) * 100
+        ),
+        "mc_dd95": float(
+            np.percentile(
+                dds,
+                95
+            )
+        ),
+        "status": "تم"
     }
 
 
@@ -2583,18 +2671,20 @@ def backtest(
 # WFO
 # ============================================================
 
-def wfo_score(df):
+def wfo_score(
+    df,
+    mc_runs=100
+):
 
     if (
         df is None
         or len(df) < 600
     ):
-
         return {
-            'score': np.nan,
-            'oos_return': np.nan,
-            'stability': np.nan,
-            'folds': 0
+            "score": np.nan,
+            "oos_return": np.nan,
+            "stability": np.nan,
+            "folds": 0
         }
 
     n = len(df)
@@ -2630,62 +2720,70 @@ def wfo_score(df):
 
         bt = backtest(
             test,
-            mc_runs=100
+            mc_runs=mc_runs
         )
 
         if bt.get(
-            'trades',
+            "trades",
             0
         ) >= 3:
 
+            score = np.clip(
+                50
+                + bt.get(
+                    "return",
+                    0
+                ),
+                0,
+                100
+            )
+
             scores.append(
-                np.clip(
-                    50 +
-                    bt['return'],
-                    0,
-                    100
-                )
+                score
             )
 
             returns.append(
-                bt['return']
+                bt.get(
+                    "return",
+                    np.nan
+                )
             )
+
+    if not scores:
+        return {
+            "score": np.nan,
+            "oos_return": np.nan,
+            "stability": np.nan,
+            "folds": 0
+        }
+
+    stability = (
+        100
+        - np.std(returns) * 2
+        if len(returns) > 1
+        else 50
+    )
 
     return {
-
-        'score':
-            float(
-                np.mean(scores)
+        "score": float(
+            np.mean(scores)
+        ),
+        "oos_return": float(
+            np.mean(returns)
+        ),
+        "stability": float(
+            np.clip(
+                stability,
+                0,
+                100
             )
-            if scores
-            else np.nan,
-
-        'oos_return':
-            float(
-                np.mean(returns)
-            )
-            if returns
-            else np.nan,
-
-        'stability':
-            float(
-                100 -
-                np.std(returns) * 2
-            )
-            if len(returns) > 1
-            else (
-                50
-                if returns
-                else np.nan
-            ),
-
-        'folds':
-            len(scores)
+        ),
+        "folds": len(scores)
     }
 
 
 # ============================================================
-# INSTITUTIONAL SCORE
+# SCORING
 # ============================================================
 
 def score_stock(
@@ -2698,110 +2796,111 @@ def score_stock(
     div
 ):
 
+    rules = SECTOR_RULES[
+        fin["sector"]
+    ]
+
+    weights = WEIGHTS[
+        fin["sector"]
+    ]
+
     fscore = []
 
-    rules = SECTOR_RULES[
-        fin['sector']
-    ]
-
-    w = WEIGHTS[
-        fin['sector']
-    ]
-
-    for k in rules:
+    for metric in rules:
 
         x = num(
-            fin['metrics'].get(k)
+            fin["metrics"].get(
+                metric
+            )
         )
 
         if pd.isna(x):
             continue
 
-        if k in [
-            'Revenue Growth',
-            'Net Income Growth',
-            'EPS Growth',
-            'FCF Growth'
+        if metric in [
+            "Revenue Growth",
+            "Net Income Growth",
+            "EPS Growth"
         ]:
 
-            s = np.clip(
+            score = np.clip(
                 50 + x * 1.5,
                 0,
                 100
             )
 
-        elif k in [
-            'ROE',
-            'ROIC'
+        elif metric in [
+            "ROE",
+            "ROIC"
         ]:
 
-            s = np.clip(
+            score = np.clip(
                 x * 3,
                 0,
                 100
             )
 
-        elif k == 'ROA':
+        elif metric == "ROA":
 
-            s = np.clip(
+            score = np.clip(
                 x * 15,
                 0,
                 100
             )
 
-        elif k in [
-            'Gross Margin',
-            'EBITDA Margin',
-            'Net Margin',
-            'FCF Margin'
+        elif metric in [
+            "Gross Margin",
+            "EBITDA Margin",
+            "Net Margin",
+            "FCF Margin"
         ]:
 
-            s = np.clip(
+            score = np.clip(
                 x * 2,
                 0,
                 100
             )
 
-        elif k == 'Debt/Equity':
+        elif metric == "Debt/Equity":
 
-            s = np.clip(
-                100 -
-                max(x, 0) * 40,
+            score = np.clip(
+                100
+                - max(x, 0) * 40,
                 0,
                 100
             )
 
-        elif k == 'Net Debt/EBITDA':
+        elif metric == "Net Debt/EBITDA":
 
-            s = np.clip(
-                100 -
-                max(x, 0) * 18,
+            score = np.clip(
+                100
+                - max(x, 0) * 18,
                 0,
                 100
             )
 
-        elif k == 'Current Ratio':
+        elif metric == "Current Ratio":
 
-            s = np.clip(
+            score = np.clip(
                 x * 50,
                 0,
                 100
             )
 
-        elif k == 'Dividend Yield':
+        elif metric == "Dividend Yield":
 
-            s = np.clip(
+            score = np.clip(
                 x * 12,
                 0,
                 100
             )
 
-        elif k == 'P/E':
+        elif metric == "P/E":
 
-            s = (
+            score = (
                 np.clip(
-                    100 -
-                    abs(x - 12) * 4,
+                    100
+                    - abs(x - 12) * 4,
                     0,
                     100
                 )
@@ -2809,12 +2908,12 @@ def score_stock(
                 else np.nan
             )
 
-        elif k == 'P/B':
+        elif metric == "P/B":
 
-            s = (
+            score = (
                 np.clip(
-                    100 -
-                    abs(x - 1.4) * 35,
+                    100
+                    - abs(x - 1.4) * 35,
                     0,
                     100
                 )
@@ -2824,69 +2923,82 @@ def score_stock(
 
         else:
 
-            s = 50
+            score = 50
 
-        if np.isfinite(s):
-
+        if np.isfinite(score):
             fscore.append(
-                (s, w[k])
+                (
+                    score,
+                    weights.get(
+                        metric,
+                        0
+                    )
+                )
             )
 
-    financial = (
-        sum(
-            s * ww
-            for s, ww in fscore
+    if fscore:
+
+        financial = (
+            sum(
+                score * weight
+                for score, weight
+                in fscore
+            )
+            /
+            sum(
+                weight
+                for _, weight
+                in fscore
+            )
         )
-        /
-        sum(
-            ww
-            for _, ww in fscore
-        )
-        if fscore
-        else np.nan
+
+    else:
+
+        financial = np.nan
+
+    quality = safe_mean(
+        [
+            forensic["piotroski"]
+            * 100
+            / 9,
+
+            forensic["earnings_quality"],
+
+            forensic["roic_quality"]
+        ]
     )
 
-    quality = np.nanmean([
-        forensic['piotroski'] *
-        100 / 9,
-
-        forensic['earnings_quality'],
-
-        forensic['roic_quality']
-    ])
+    upside = num(
+        val.get("Upside %")
+    )
 
     valuation = (
-        50 +
-        np.clip(
-            num(
-                val.get('Upside %')
-            ),
+        50
+        + np.clip(
+            upside,
             -50,
             100
-        ) *
-        .35
-        if pd.notna(
-            num(val.get('Upside %'))
-        )
+        ) * .35
+        if pd.notna(upside)
         else 50
     )
 
-    technical = num(
-        tech.get('score')
+    technical_score = num(
+        tech.get("score")
     )
 
     evidence = []
 
     if bt.get(
-        'trades',
+        "trades",
         0
     ) >= 5:
 
         evidence.append(
             np.clip(
-                50 +
-                bt.get(
-                    'expectancy',
+                50
+                + bt.get(
+                    "expectancy",
                     0
                 ) * 5,
                 0,
@@ -2895,21 +3007,21 @@ def score_stock(
         )
 
     if pd.notna(
-        wfo.get('score')
+        wfo.get("score")
     ):
 
         evidence.append(
-            wfo['score']
+            wfo["score"]
         )
 
     if bt.get(
-        'trades',
+        "trades",
         0
     ) >= 5:
 
         evidence.append(
             bt.get(
-                'mc_profit_prob',
+                "mc_profit_prob",
                 50
             )
         )
@@ -2922,85 +3034,85 @@ def score_stock(
         else np.nan
     )
 
-    stability = np.nanmean([
-        wfo.get(
-            'stability',
-            np.nan
-        ),
+    stability_components = []
 
-        np.clip(
-            100 -
-            bt.get(
-                'max_dd',
-                50
-            ) * 2,
-            0,
-            100
+    if pd.notna(
+        wfo.get("stability")
+    ):
+        stability_components.append(
+            wfo["stability"]
         )
-        if bt.get(
-            'trades',
-            0
+
+    if bt.get(
+        "trades",
+        0
+    ):
+
+        stability_components.append(
+            np.clip(
+                100
+                - bt.get(
+                    "max_dd",
+                    50
+                ) * 2,
+                0,
+                100
+            )
         )
-        else np.nan
-    ])
+
+    stability = safe_mean(
+        stability_components
+    )
 
     parts = [
-
         (financial, .30),
         (quality, .15),
         (valuation, .15),
-        (technical, .15),
+        (technical_score, .15),
         (evidence_score, .15),
         (stability, .10)
     ]
 
-    avail = [
-        (v, w)
-        for v, w in parts
-        if pd.notna(v)
+    available = [
+        (value, weight)
+        for value, weight
+        in parts
+        if pd.notna(value)
     ]
 
-    final = (
-        sum(
-            v * w
-            for v, w in avail
+    if available:
+
+        final = (
+            sum(
+                value * weight
+                for value, weight
+                in available
+            )
+            /
+            sum(
+                weight
+                for _, weight
+                in available
+            )
         )
-        /
-        sum(
-            w
-            for _, w in avail
-        )
-        if avail
-        else np.nan
-    )
+
+    else:
+
+        final = np.nan
 
     return {
-
-        'financial':
-            financial,
-
-        'forensic':
-            quality,
-
-        'valuation':
-            valuation,
-
-        'technical':
-            technical,
-
-        'evidence':
-            evidence_score,
-
-        'stability':
-            stability,
-
-        'final':
-            final
+        "financial": financial,
+        "forensic": quality,
+        "valuation": valuation,
+        "technical": technical_score,
+        "evidence": evidence_score,
+        "stability": stability,
+        "final": final
     }
 
 
 # ============================================================
-# SINGLE STOCK ANALYSIS
+# ANALYZE ONE
 # ============================================================
 
 @st.cache_data(
@@ -3020,223 +3132,268 @@ def analyze_one(
     if not ds.ok:
 
         return {
-            'symbol': sym,
-            'error': ds.error
+            "symbol": sym,
+            "error":
+                ds.error
+                or "Yahoo data unavailable"
         }
 
     raw = ds.data
 
-    (
-        m,
-        inc,
-        bal,
-        cf,
-        info,
-        last_price_date
-    ) = normalize_financials(
-        raw
-    )
-
-    sec = sector(
-        sym,
-        info
-    )
-
-    pi, tests = piotroski(
-        m,
-        inc,
-        bal,
-        cf
-    )
-
-    bene = beneish(m)
-
-    alt = altman(
-        m,
-        sec
-    )
-
-    eq, accr = earnings_quality(
-        m
-    )
-
-    rq = roic_quality(
-        m
-    )
-
-    div = dividend_engine(
-        raw['ticker'],
-        m.get('Price')
-    )
-
-    m['Dividend Yield'] = div.get(
-        'yield'
-    )
-
-    fin = {
-        'sector': sec,
-        'metrics': m
-    }
-
-    val = valuation_engine(
-        m,
-        sec
-    )
-
     try:
 
-        hist = raw['ticker'].history(
-            period='5y',
-            interval='1d',
-            auto_adjust=False
+        (
+            m,
+            inc,
+            bal,
+            cf,
+            info
+        ) = normalize_financials(
+            raw
         )
 
-    except Exception:
-
-        hist = pd.DataFrame()
-
-    tech = technical(
-        hist
-    )
-
-    if run_bt:
-
-        bt = backtest(
-            hist,
-            mc_runs=mc_runs
+        sec = sector(
+            sym,
+            info
         )
 
-        wfo = wfo_score(
+        # ----------------------------------------------------
+        # History
+        # ----------------------------------------------------
+
+        try:
+
+            hist = raw[
+                "ticker"
+            ].history(
+                period="5y",
+                interval="1d",
+                auto_adjust=False
+            )
+
+        except Exception:
+
+            hist = pd.DataFrame()
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Use historical close as current price whenever
+        # available. This prevents stale Yahoo info price.
+        # ----------------------------------------------------
+
+        latest_price = get_latest_close(
             hist
         )
 
-    else:
+        if (
+            pd.notna(latest_price)
+            and latest_price > 0
+        ):
 
-        bt = {
-            'trades': 0
-        }
+            m["Price"] = latest_price
 
-        wfo = {
-            'score': np.nan,
-            'oos_return': np.nan,
-            'stability': np.nan,
-            'folds': 0
-        }
+            market_cap = num(
+                m.get("Market Cap")
+            )
 
-    forensic = {
+            # Do NOT overwrite real sharesOutstanding.
+            if (
+                pd.isna(
+                    num(m.get("Shares"))
+                )
+                and pd.notna(market_cap)
+            ):
 
-        'piotroski':
-            pi,
+                m["Shares"] = (
+                    market_cap
+                    / latest_price
+                )
 
-        'beneish':
-            bene,
+        # ----------------------------------------------------
+        # Market cap can be recalculated using current price
+        # only if shares are known.
+        # ----------------------------------------------------
 
-        'altman':
-            alt,
-
-        'earnings_quality':
-            eq,
-
-        'roic_quality':
-            rq
-    }
-
-    scores = score_stock(
-        fin,
-        forensic,
-        val,
-        tech,
-        bt,
-        wfo,
-        div
-    )
-
-    # --------------------------------------------------------
-    # Coverage
-    # --------------------------------------------------------
-
-    coverage_values = []
-
-    for k, v in m.items():
-
-        if k.startswith('_'):
-            continue
-
-        coverage_values.append(
-            pd.notna(v)
+        shares = num(
+            m.get("Shares")
         )
 
-    coverage = (
-        np.mean(
-            coverage_values
-        ) * 100
-        if coverage_values
-        else 0
-    )
+        if (
+            pd.notna(shares)
+            and shares > 0
+            and pd.notna(latest_price)
+        ):
 
-    # Technical last candle takes priority.
-    actual_last_date = (
-        tech.get(
-            'last_date',
-            last_price_date
-        )
-        if tech
-        else last_price_date
-    )
+            m["Market Cap"] = (
+                shares
+                * latest_price
+            )
 
-    return {
+        # ----------------------------------------------------
+        # Forensic
+        # ----------------------------------------------------
 
-        'symbol':
-            sym,
-
-        'name':
-            info.get(
-                'longName',
-                sym
-            ),
-
-        'sector':
-            sec,
-
-        'industry':
-            info.get(
-                'industry',
-                ''
-            ),
-
-        'metrics':
+        pi, tests = piotroski(
             m,
+            inc,
+            bal,
+            cf
+        )
 
-        'valuation':
-            val,
+        bene = beneish(
+            m
+        )
 
-        'dividend':
-            div,
+        alt = altman(
+            m,
+            sec
+        )
 
-        'technical':
-            tech,
+        eq, accr = earnings_quality(
+            m
+        )
 
-        'backtest':
-            bt,
+        rq = roic_quality(
+            m
+        )
 
-        'wfo':
-            wfo,
+        div = dividend_engine(
+            raw["ticker"],
+            m.get("Price")
+        )
 
-        'forensic':
+        m["Dividend Yield"] = (
+            div.get("yield")
+        )
+
+        # ----------------------------------------------------
+        # Valuation
+        # ----------------------------------------------------
+
+        fin = {
+            "sector": sec,
+            "metrics": m
+        }
+
+        val = valuation_engine(
+            m,
+            sec
+        )
+
+        # ----------------------------------------------------
+        # Technical / Backtest
+        # ----------------------------------------------------
+
+        tech = technical(
+            hist
+        )
+
+        if run_bt:
+
+            bt = backtest(
+                hist,
+                mc_runs=mc_runs
+            )
+
+            wfo = wfo_score(
+                hist,
+                mc_runs=min(
+                    100,
+                    mc_runs
+                )
+            )
+
+        else:
+
+            bt = {
+                "trades": 0,
+                "status":
+                    "غير مفعل"
+            }
+
+            wfo = {
+                "score": np.nan,
+                "oos_return": np.nan,
+                "stability": np.nan,
+                "folds": 0
+            }
+
+        forensic = {
+            "piotroski": pi,
+            "piotroski_tests": tests,
+            "beneish": bene,
+            "altman": alt,
+            "earnings_quality": eq,
+            "accrual": accr,
+            "roic_quality": rq
+        }
+
+        scores = score_stock(
+            fin,
             forensic,
+            val,
+            tech,
+            bt,
+            wfo,
+            div
+        )
 
-        'scores':
-            scores,
+        metric_values = [
+            v
+            for k, v in m.items()
+            if not str(k).startswith("_")
+        ]
 
-        'coverage':
-            coverage,
+        coverage = (
+            np.mean(
+                [
+                    pd.notna(v)
+                    for v in metric_values
+                ]
+            )
+            * 100
+            if metric_values
+            else 0
+        )
 
-        'source':
-            'Yahoo Finance',
+        return {
+            "symbol": sym,
+            "name":
+                info.get(
+                    "longName",
+                    sym
+                ),
+            "sector": sec,
+            "industry":
+                info.get(
+                    "industry",
+                    ""
+                ),
+            "metrics": m,
+            "valuation": val,
+            "dividend": div,
+            "technical": tech,
+            "backtest": bt,
+            "wfo": wfo,
+            "forensic": forensic,
+            "scores": scores,
+            "coverage": coverage,
+            "source": "Yahoo Finance",
+            "last_date":
+                get_last_date(hist),
+            "source_errors":
+                raw.get(
+                    "source_errors",
+                    []
+                )
+        }
 
-        'last_date':
-            actual_last_date
-    }
+    except Exception as e:
+
+        return {
+            "symbol": sym,
+            "error": str(e)
+        }
 
 
 # ============================================================
@@ -3253,42 +3410,46 @@ def run_all(
     mc_runs
 ):
 
-    out = []
+    output = []
 
     with ThreadPoolExecutor(
         max_workers=8
-    ) as ex:
+    ) as executor:
 
         futures = {
-            ex.submit(
+            executor.submit(
                 analyze_one,
-                s,
+                symbol,
                 run_bt,
                 mc_runs
-            ): s
-            for s in symbols
+            ): symbol
+            for symbol in symbols
         }
 
-        for f in as_completed(
+        for future in as_completed(
             futures
         ):
 
+            symbol = futures[
+                future
+            ]
+
             try:
 
-                out.append(
-                    f.result()
+                output.append(
+                    future.result()
                 )
 
             except Exception as e:
 
-                out.append({
-                    'symbol':
-                        futures[f],
-                    'error':
-                        str(e)
-                })
+                output.append(
+                    {
+                        "symbol": symbol,
+                        "error": str(e)
+                    }
+                )
 
-    return out
+    return output
 
 
 # ============================================================
@@ -3296,24 +3457,22 @@ def run_all(
 # ============================================================
 
 st.title(
-    '🏛️ EGX Institutional Analyzer V5'
+    "🏛️ EGX Institutional Analyzer V5.1"
 )
 
 st.caption(
-    'Financial Intelligence + TTM + True FCFF + '
-    '3-Scenario DCF + Relative Valuation + '
-    'Forensic Quality + V9 Technical Evidence + '
-    'Backtest/WFO/OOS + Monte Carlo + Stability'
+    "Financial Intelligence + Realistic FCFF DCF + Relative Valuation + "
+    "Forensic Quality + V9 Technical + Backtest/WFO/OOS + Monte Carlo + Stability"
 )
 
 with st.sidebar:
 
     st.header(
-        '⚙️ إعدادات المؤسسة'
+        "⚙️ إعدادات المؤسسة"
     )
 
     min_cov = st.slider(
-        'أقل اكتمال بيانات %',
+        "أقل اكتمال بيانات %",
         0,
         100,
         55,
@@ -3321,25 +3480,25 @@ with st.sidebar:
     )
 
     top_n = st.number_input(
-        'عدد الأسهم في الترتيب',
+        "عدد الأسهم في الترتيب",
         5,
         100,
         20
     )
 
     run_bt = st.checkbox(
-        'تشغيل Backtest + WFO/OOS + Monte Carlo',
+        "تشغيل Backtest + WFO/OOS + Monte Carlo",
         True
     )
 
     mc_runs = st.selectbox(
-        'Monte Carlo',
+        "Monte Carlo",
         [100, 250, 500, 1000],
         index=2
     )
 
     if st.button(
-        '🔄 تحديث كامل'
+        "🔄 تحديث كامل"
     ):
 
         analyze_one.clear()
@@ -3349,188 +3508,170 @@ with st.sidebar:
 
 
 # ============================================================
-# RUN
+# EXECUTION
 # ============================================================
 
 with st.spinner(
-    '🏗️ بناء التحليل المؤسسي...'
+    "🏗️ بناء التحليل المؤسسي..."
 ):
 
     results = run_all(
-        tuple(STOCKS),
+        STOCKS,
         run_bt,
         mc_runs
     )
 
 
 # ============================================================
-# RANKING TABLE
+# TABLE
 # ============================================================
 
 rows = []
 
 for r in results:
 
-    if (
-        r.get('error')
-        or r.get(
-            'coverage',
-            0
-        ) < min_cov
-    ):
+    if r.get("error"):
         continue
 
-    s = r['scores']
-    v = r['valuation']
-    t = r['technical']
-    b = r['backtest']
-    w = r['wfo']
-    f = r['forensic']
-    d = r['dividend']
+    if r.get(
+        "coverage",
+        0
+    ) < min_cov:
+        continue
 
-    rows.append({
+    s = r["scores"]
+    v = r["valuation"]
+    t = r["technical"]
+    b = r["backtest"]
+    w = r["wfo"]
+    f = r["forensic"]
+    d = r["dividend"]
 
-        'الترتيب':
-            0,
+    rows.append(
+        {
+            "الترتيب": 0,
 
-        'السهم':
-            r['symbol'].replace(
-                '.CA',
-                ''
-            ),
+            "السهم":
+                r["symbol"].replace(
+                    ".CA",
+                    ""
+                ),
 
-        'القطاع':
-            r['sector'],
+            "القطاع":
+                r["sector"],
 
-        'الدرجة النهائية':
-            s.get('final'),
+            "الدرجة النهائية":
+                s.get("final"),
 
-        'المالي':
-            s.get('financial'),
+            "المالي":
+                s.get("financial"),
 
-        'الجودة المحاسبية':
-            s.get('forensic'),
+            "الجودة المحاسبية":
+                s.get("forensic"),
 
-        'التقييم':
-            s.get('valuation'),
+            "التقييم":
+                s.get("valuation"),
 
-        'الفني V9':
-            s.get('technical'),
+            "الفني V9":
+                s.get("technical"),
 
-        'الدليل الإحصائي':
-            s.get('evidence'),
+            "الدليل الإحصائي":
+                s.get("evidence"),
 
-        'الاستقرار':
-            s.get('stability'),
+            "الاستقرار":
+                s.get("stability"),
 
-        'القيمة العادلة':
-            v.get('Fair Value'),
+            "القيمة العادلة":
+                v.get("Fair Value"),
 
-        'DCF محافظ':
-            v.get('Conservative DCF'),
+            "القيمة العادلة منخفضة":
+                v.get("Fair Value Low"),
 
-        'DCF أساسي':
-            v.get('Base DCF'),
+            "القيمة العادلة مرتفعة":
+                v.get("Fair Value High"),
 
-        'DCF متفائل':
-            v.get('Optimistic DCF'),
+            "DCF محافظ":
+                v.get("DCF Conservative"),
 
-        'شراء 20% MOS':
-            v.get('Buy 20% MOS'),
+            "DCF Base":
+                v.get("DCF Base"),
 
-        'شراء قوي 30% MOS':
-            v.get('Strong Buy 30% MOS'),
+            "DCF متفائل":
+                v.get("DCF Optimistic"),
 
-        'الصعود %':
-            v.get('Upside %'),
+            "Relative":
+                v.get("Relative"),
 
-        'Piotroski':
-            f['piotroski'],
+            "شراء 20% MOS":
+                v.get("Buy 20% MOS"),
 
-        'Beneish Flags':
-            f['beneish']['risk_flags'],
+            "شراء قوي 30% MOS":
+                v.get("Strong Buy 30% MOS"),
 
-        'Altman Z':
-            f['altman']['score'],
+            "الصعود %":
+                v.get("Upside %"),
 
-        'جودة الأرباح':
-            f['earnings_quality'],
+            "Piotroski":
+                f["piotroski"],
 
-        'ROIC Quality':
-            f['roic_quality'],
+            "Beneish Flags":
+                f["beneish"]["risk_flags"],
 
-        'Dividend Yield %':
-            d.get('yield'),
+            "Altman Z":
+                f["altman"]["score"],
 
-        'صفقات Backtest':
-            b.get('trades', 0),
+            "جودة الأرباح":
+                f["earnings_quality"],
 
-        'Win Rate %':
-            b.get(
-                'win_rate',
-                np.nan
-            ),
+            "ROIC Quality":
+                f["roic_quality"],
 
-        'Return %':
-            b.get(
-                'return',
-                np.nan
-            ),
+            "Dividend Yield %":
+                d.get("yield"),
 
-        'Max DD %':
-            b.get(
-                'max_dd',
-                np.nan
-            ),
+            "صفقات Backtest":
+                b.get("trades", 0),
 
-        'Profit Factor':
-            b.get(
-                'pf',
-                np.nan
-            ),
+            "Win Rate %":
+                b.get("win_rate", np.nan),
 
-        'Expectancy %':
-            b.get(
-                'expectancy',
-                np.nan
-            ),
+            "Return %":
+                b.get("return", np.nan),
 
-        'Sharpe':
-            b.get(
-                'sharpe',
-                np.nan
-            ),
+            "Max DD %":
+                b.get("max_dd", np.nan),
 
-        'WFO Score':
-            w.get(
-                'score',
-                np.nan
-            ),
+            "Profit Factor":
+                b.get("pf", np.nan),
 
-        'OOS Return %':
-            w.get(
-                'oos_return',
-                np.nan
-            ),
+            "Expectancy %":
+                b.get("expectancy", np.nan),
 
-        'MC Median %':
-            b.get(
-                'mc50',
-                np.nan
-            ),
+            "Sharpe":
+                b.get("sharpe", np.nan),
 
-        'MC Profit Prob %':
-            b.get(
-                'mc_profit_prob',
-                np.nan
-            ),
+            "WFO Score":
+                w.get("score", np.nan),
 
-        'اكتمال البيانات %':
-            r['coverage'],
+            "OOS Return %":
+                w.get("oos_return", np.nan),
 
-        'آخر شمعة':
-            r['last_date']
-    })
+            "MC Median %":
+                b.get("mc50", np.nan),
+
+            "MC Profit Prob %":
+                b.get(
+                    "mc_profit_prob",
+                    np.nan
+                ),
+
+            "اكتمال البيانات %":
+                r["coverage"],
+
+            "آخر شمعة":
+                r["last_date"]
+        }
+    )
 
 
 df = pd.DataFrame(
@@ -3540,31 +3681,33 @@ df = pd.DataFrame(
 if not df.empty:
 
     df = df.sort_values(
-        'الدرجة النهائية',
+        "الدرجة النهائية",
         ascending=False,
-        na_position='last'
+        na_position="last"
     ).reset_index(
         drop=True
     )
 
-    df['الترتيب'] = np.arange(
-        1,
-        len(df) + 1
+    df["الترتيب"] = (
+        np.arange(
+            1,
+            len(df) + 1
+        )
     )
 
 
 # ============================================================
-# FINAL RANKING
+# RANKING
 # ============================================================
 
 st.subheader(
-    '🏆 الترتيب المؤسسي النهائي'
+    "🏆 الترتيب المؤسسي النهائي"
 )
 
 if df.empty:
 
     st.warning(
-        'لا توجد نتائج مؤهلة وفق حد اكتمال البيانات.'
+        "لا توجد نتائج مؤهلة وفق حد اكتمال البيانات."
     )
 
 else:
@@ -3578,18 +3721,15 @@ else:
     )
 
     st.download_button(
-        '⬇️ تنزيل التقرير CSV',
-
+        "⬇️ تنزيل التقرير CSV",
         df.to_csv(
             index=False,
-            encoding='utf-8-sig'
+            encoding="utf-8-sig"
         ).encode(
-            'utf-8-sig'
+            "utf-8-sig"
         ),
-
-        'EGX_Institutional_V5.csv',
-
-        'text/csv'
+        "EGX_Institutional_V5_1.csv",
+        "text/csv"
     )
 
 
@@ -3598,467 +3738,440 @@ else:
 # ============================================================
 
 st.subheader(
-    '🔎 تقرير مؤسسي كامل لسهم'
+    "🔎 تقرير مؤسسي كامل لسهم"
 )
 
-if results:
+valid = [
+    r
+    for r in results
+    if not r.get("error")
+]
 
-    valid = [
-        r
-        for r in results
-        if not r.get('error')
+if valid:
+
+    symbols_sorted = sorted(
+        [
+            r["symbol"]
+            for r in valid
+        ]
+    )
+
+    sel = st.selectbox(
+        "اختر السهم",
+        symbols_sorted,
+        format_func=lambda x:
+            x.replace(
+                ".CA",
+                ""
+            )
+    )
+
+    r = next(
+        x
+        for x in valid
+        if x["symbol"] == sel
+    )
+
+    s = r["scores"]
+    f = r["forensic"]
+    v = r["valuation"]
+    t = r["technical"]
+    b = r["backtest"]
+    w = r["wfo"]
+    d = r["dividend"]
+
+    # --------------------------------------------------------
+    # Score cards
+    # --------------------------------------------------------
+
+    cols = st.columns(
+        7
+    )
+
+    values = [
+        s.get("final"),
+        s.get("financial"),
+        s.get("forensic"),
+        s.get("valuation"),
+        s.get("technical"),
+        s.get("evidence"),
+        s.get("stability")
     ]
 
-    if valid:
+    labels = [
+        "Final Investment Score",
+        "Financial",
+        "Forensic",
+        "Valuation",
+        "Technical V9",
+        "Evidence",
+        "Stability"
+    ]
 
-        sel = st.selectbox(
-            'اختر السهم',
-            sorted(
-                [
-                    r['symbol']
-                    for r in valid
-                ]
-            ),
-            format_func=lambda x:
-                x.replace(
-                    '.CA',
-                    ''
+    for col, label, value in zip(
+        cols,
+        labels,
+        values
+    ):
+
+        col.metric(
+            label,
+            (
+                "—"
+                if pd.isna(value)
+                else f"{value:.1f}"
+            )
+        )
+
+    st.write(
+        f"**{r['name']}** | "
+        f"القطاع: **{r['sector']}** | "
+        f"آخر شمعة: **{r['last_date']}** | "
+        f"المصدر الأساسي: **{r['source']}** | "
+        f"اكتمال البيانات: **{r['coverage']:.0f}%**"
+    )
+
+    # ========================================================
+    # VALUATION
+    # ========================================================
+
+    st.markdown(
+        "### 💰 Valuation V2 — DCF / FCFF + Relative"
+    )
+
+    valuation_rows = [
+        {
+            "النموذج":
+                "DCF محافظ",
+            "القيمة":
+                v.get(
+                    "DCF Conservative"
                 )
-        )
+        },
+        {
+            "النموذج":
+                "DCF Base",
+            "القيمة":
+                v.get(
+                    "DCF Base"
+                )
+        },
+        {
+            "النموذج":
+                "DCF متفائل",
+            "القيمة":
+                v.get(
+                    "DCF Optimistic"
+                )
+        },
+        {
+            "النموذج":
+                "Relative P/E + P/B",
+            "القيمة":
+                v.get(
+                    "Relative"
+                )
+        },
+        {
+            "النموذج":
+                "P/E Fair Value",
+            "القيمة":
+                v.get(
+                    "PE Fair Value"
+                )
+        },
+        {
+            "النموذج":
+                "P/B Fair Value",
+            "القيمة":
+                v.get(
+                    "PB Fair Value"
+                )
+        },
+        {
+            "النموذج":
+                "القيمة العادلة المنخفضة",
+            "القيمة":
+                v.get(
+                    "Fair Value Low"
+                )
+        },
+        {
+            "النموذج":
+                "القيمة العادلة الأساسية",
+            "القيمة":
+                v.get(
+                    "Fair Value"
+                )
+        },
+        {
+            "النموذج":
+                "القيمة العادلة المرتفعة",
+            "القيمة":
+                v.get(
+                    "Fair Value High"
+                )
+        },
+        {
+            "النموذج":
+                "شراء بهامش أمان 20%",
+            "القيمة":
+                v.get(
+                    "Buy 20% MOS"
+                )
+        },
+        {
+            "النموذج":
+                "شراء قوي بهامش أمان 30%",
+            "القيمة":
+                v.get(
+                    "Strong Buy 30% MOS"
+                )
+        },
+        {
+            "النموذج":
+                "الصعود المحتمل %",
+            "القيمة":
+                v.get(
+                    "Upside %"
+                )
+        },
+        {
+            "النموذج":
+                "الصعود المحافظ %",
+            "القيمة":
+                v.get(
+                    "Conservative Upside %"
+                )
+        }
+    ]
 
-        r = next(
-            x
-            for x in valid
-            if x['symbol'] == sel
-        )
+    valuation_df = pd.DataFrame(
+        valuation_rows
+    )
 
-        s = r['scores']
-        f = r['forensic']
-        v = r['valuation']
-        t = r['technical']
-        b = r['backtest']
-        w = r['wfo']
-        d = r['dividend']
+    st.dataframe(
+        valuation_df.style.format(
+            {
+                "القيمة": "{:.2f}"
+            },
+            na_rep="—"
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
 
-        cols = st.columns(
-            7
-        )
+    st.write(
+        f"**منهج التقييم:** "
+        f"{v.get('Valuation Method', '—')}"
+    )
 
-        labels = [
-            'Final Investment Score',
-            'Financial',
-            'Forensic',
-            'Valuation',
-            'Technical V9',
-            'Evidence',
-            'Stability'
+    st.write(
+        f"**WACC Base:** "
+        f"{v.get('WACC Base', np.nan):.2f}% | "
+        f"**Terminal Growth:** "
+        f"{v.get('Terminal Growth Base', np.nan):.2f}% | "
+        f"**PE Reference:** "
+        f"{v.get('PE Reference', np.nan):.2f} | "
+        f"**PB Reference:** "
+        f"{v.get('PB Reference', np.nan):.2f}"
+    )
+
+    # ========================================================
+    # FORENSIC
+    # ========================================================
+
+    st.markdown(
+        "### 🧪 Forensic Accounting"
+    )
+
+    forensic_rows = [
+        {
+            "المحرك":
+                "Piotroski F-Score",
+            "القيمة":
+                f["piotroski"],
+            "المعنى":
+                "قوة مالية تشغيلية"
+        },
+        {
+            "المحرك":
+                "Beneish Screening",
+            "القيمة":
+                f["beneish"][
+                    "risk_flags"
+                ],
+            "المعنى":
+                f["beneish"][
+                    "status"
+                ]
+        },
+        {
+            "المحرك":
+                "Altman Z-Score",
+            "القيمة":
+                f["altman"][
+                    "score"
+                ],
+            "المعنى":
+                f["altman"][
+                    "status"
+                ]
+        },
+        {
+            "المحرك":
+                "Earnings Quality",
+            "القيمة":
+                f["earnings_quality"],
+            "المعنى":
+                "جودة الأرباح والتدفقات"
+        },
+        {
+            "المحرك":
+                "ROIC Quality",
+            "القيمة":
+                f["roic_quality"],
+            "المعنى":
+                "كفاءة رأس المال"
+        }
+    ]
+
+    st.dataframe(
+        pd.DataFrame(
+            forensic_rows
+        ).style.format(
+            {
+                "القيمة": "{:.2f}"
+            },
+            na_rep="—"
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # ========================================================
+    # TECHNICAL
+    # ========================================================
+
+    st.markdown(
+        "### 📈 V9 Technical"
+    )
+
+    techdf = pd.DataFrame(
+        [
+            {
+                "المؤشر": key,
+                "القيمة": value
+            }
+            for key, value
+            in t.items()
         ]
+    )
 
-        values = [
-            s['final'],
-            s['financial'],
-            s['forensic'],
-            s['valuation'],
-            s['technical'],
-            s['evidence'],
-            s['stability']
-        ]
+    st.dataframe(
+        techdf,
+        use_container_width=True,
+        hide_index=True
+    )
 
-        for c, label, val in zip(
-            cols,
-            labels,
-            values
+    # ========================================================
+    # BACKTEST
+    # ========================================================
+
+    st.markdown(
+        "### 🧪 Backtest + WFO/OOS + Monte Carlo"
+    )
+
+    evidence_rows = []
+
+    for key, value in b.items():
+
+        evidence_rows.append(
+            {
+                "المؤشر": key,
+                "القيمة": value
+            }
+        )
+
+    for key, value in w.items():
+
+        evidence_rows.append(
+            {
+                "المؤشر": key,
+                "القيمة": value
+            }
+        )
+
+    st.dataframe(
+        pd.DataFrame(
+            evidence_rows
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # ========================================================
+    # DIVIDENDS
+    # ========================================================
+
+    st.markdown(
+        "### 💵 Dividend Sustainability"
+    )
+
+    st.dataframe(
+        pd.DataFrame(
+            [d]
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # ========================================================
+    # FINANCIAL DATA
+    # ========================================================
+
+    st.markdown(
+        "### 📊 Financial Normalized Data"
+    )
+
+    financial_rows = [
+        {
+            "المؤشر": key,
+            "القيمة": value
+        }
+        for key, value
+        in r["metrics"].items()
+        if not str(key).startswith("_")
+    ]
+
+    st.dataframe(
+        pd.DataFrame(
+            financial_rows
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # ========================================================
+    # DATA WARNINGS
+    # ========================================================
+
+    source_errors = r.get(
+        "source_errors",
+        []
+    )
+
+    if source_errors:
+
+        with st.expander(
+            "⚠️ ملاحظات مصدر البيانات"
         ):
 
-            c.metric(
-                label,
-                '—'
-                if pd.isna(val)
-                else f'{val:.1f}'
-            )
+            for error in source_errors:
 
-        st.write(
-            f"**{r['name']}** | "
-            f"القطاع: **{r['sector']}** | "
-            f"آخر شمعة: **{r['last_date']}** | "
-            f"المصدر الأساسي: **{r['source']}** | "
-            f"اكتمال البيانات: **{r['coverage']:.0f}%**"
-        )
-
-        # ----------------------------------------------------
-        # VALUATION
-        # ----------------------------------------------------
-
-        st.markdown(
-            '### 💰 True FCFF + 3-Scenario DCF + Relative Valuation'
-        )
-
-        valuation_rows = [
-
-            {
-                'النموذج':
-                    'DCF محافظ',
-                'القيمة':
-                    v.get(
-                        'Conservative DCF'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'DCF أساسي',
-                'القيمة':
-                    v.get(
-                        'Base DCF'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'DCF متفائل',
-                'القيمة':
-                    v.get(
-                        'Optimistic DCF'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'Sector Relative',
-                'القيمة':
-                    v.get(
-                        'Relative'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'Normalized Earnings',
-                'القيمة':
-                    v.get(
-                        'Normalized Earnings'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'القيمة العادلة المدمجة',
-                'القيمة':
-                    v.get(
-                        'Fair Value'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'شراء بهامش أمان 20%',
-                'القيمة':
-                    v.get(
-                        'Buy 20% MOS'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'شراء قوي بهامش أمان 30%',
-                'القيمة':
-                    v.get(
-                        'Strong Buy 30% MOS'
-                    )
-            },
-
-            {
-                'النموذج':
-                    'الصعود المحتمل %',
-                'القيمة':
-                    v.get(
-                        'Upside %'
-                    )
-            }
-        ]
-
-        valuation_df = pd.DataFrame(
-            valuation_rows
-        )
-
-        st.dataframe(
-            valuation_df.style.format(
-                {
-                    'القيمة':
-                        '{:.2f}'
-                },
-                na_rep='—'
-            ),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ----------------------------------------------------
-        # DCF ASSUMPTIONS
-        # ----------------------------------------------------
-
-        st.markdown(
-            '#### ⚙️ مدخلات FCFF المستخدمة'
-        )
-
-        m = r['metrics']
-
-        fcff_inputs = pd.DataFrame([
-            {
-                'المؤشر':
-                    'Revenue TTM',
-                'القيمة':
-                    m.get('Revenue')
-            },
-
-            {
-                'المؤشر':
-                    'Revenue Growth TTM %',
-                'القيمة':
-                    m.get('Revenue Growth')
-            },
-
-            {
-                'المؤشر':
-                    'FCF TTM',
-                'القيمة':
-                    m.get('FCF')
-            },
-
-            {
-                'المؤشر':
-                    'FCF Growth TTM %',
-                'القيمة':
-                    m.get('FCF Growth')
-            },
-
-            {
-                'المؤشر':
-                    'EBIT TTM',
-                'القيمة':
-                    m.get('EBIT')
-            },
-
-            {
-                'المؤشر':
-                    'D&A TTM',
-                'القيمة':
-                    m.get('D&A')
-            },
-
-            {
-                'المؤشر':
-                    'NOPAT',
-                'القيمة':
-                    m.get('NOPAT')
-            },
-
-            {
-                'المؤشر':
-                    'Capex',
-                'القيمة':
-                    m.get('Capex')
-            },
-
-            {
-                'المؤشر':
-                    'Delta NWC',
-                'القيمة':
-                    m.get('Delta NWC')
-            },
-
-            {
-                'المؤشر':
-                    'True FCFF',
-                'القيمة':
-                    m.get('FCFF')
-            },
-
-            {
-                'المؤشر':
-                    'Tax Rate %',
-                'القيمة':
-                    m.get('Tax Rate')
-            },
-
-            {
-                'المؤشر':
-                    'Shares Outstanding',
-                'القيمة':
-                    m.get('Shares')
-            },
-
-            {
-                'المؤشر':
-                    'BVPS',
-                'القيمة':
-                    m.get('BVPS')
-            }
-        ])
-
-        st.dataframe(
-            fcff_inputs.style.format(
-                {
-                    'القيمة':
-                        '{:.2f}'
-                },
-                na_rep='—'
-            ),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ----------------------------------------------------
-        # FORENSIC
-        # ----------------------------------------------------
-
-        st.markdown(
-            '### 🧪 Forensic Accounting'
-        )
-
-        forensic_df = pd.DataFrame([
-
-            {
-                'المحرك':
-                    'Piotroski F-Score',
-                'القيمة':
-                    f['piotroski'],
-                'المعنى':
-                    'قوة مالية تشغيلية'
-            },
-
-            {
-                'المحرك':
-                    'Beneish M-Score',
-                'القيمة':
-                    f['beneish']['risk_flags'],
-                'المعنى':
-                    f['beneish']['status']
-            },
-
-            {
-                'المحرك':
-                    'Altman Z-Score',
-                'القيمة':
-                    f['altman']['score'],
-                'المعنى':
-                    f['altman']['status']
-            },
-
-            {
-                'المحرك':
-                    'Earnings Quality',
-                'القيمة':
-                    f['earnings_quality'],
-                'المعنى':
-                    'جودة الأرباح والتدفقات'
-            },
-
-            {
-                'المحرك':
-                    'ROIC Quality',
-                'القيمة':
-                    f['roic_quality'],
-                'المعنى':
-                    'كفاءة رأس المال'
-            }
-
-        ])
-
-        st.dataframe(
-            forensic_df.style.format(
-                {
-                    'القيمة':
-                        '{:.2f}'
-                },
-                na_rep='—'
-            ),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ----------------------------------------------------
-        # TECHNICAL
-        # ----------------------------------------------------
-
-        st.markdown(
-            '### 📈 V9 Technical + Backtest + WFO/OOS + Monte Carlo'
-        )
-
-        techdf = pd.DataFrame([
-            {
-                'المؤشر': k,
-                'القيمة': val
-            }
-            for k, val in t.items()
-        ])
-
-        st.dataframe(
-            techdf,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        evdf = pd.DataFrame(
-            [
-                {
-                    'المؤشر': k,
-                    'القيمة': val
-                }
-                for k, val in b.items()
-            ]
-            +
-            [
-                {
-                    'المؤشر': k,
-                    'القيمة': val
-                }
-                for k, val in w.items()
-            ]
-        )
-
-        st.dataframe(
-            evdf,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ----------------------------------------------------
-        # DIVIDENDS
-        # ----------------------------------------------------
-
-        st.markdown(
-            '### 💵 Dividend Sustainability'
-        )
-
-        st.dataframe(
-            pd.DataFrame([d]),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ----------------------------------------------------
-        # FINANCIAL NORMALIZED DATA
-        # ----------------------------------------------------
-
-        st.markdown(
-            '### 📊 Financial TTM / Normalized Data'
-        )
-
-        fm = pd.DataFrame([
-            {
-                'المؤشر': k,
-                'القيمة': val
-            }
-            for k, val in r['metrics'].items()
-            if not k.startswith('_')
-        ])
-
-        st.dataframe(
-            fm,
-            use_container_width=True,
-            hide_index=True
-        )
+                st.write(
+                    f"- {error}"
+                )
 
 
 # ============================================================
@@ -4068,10 +4181,10 @@ if results:
 st.divider()
 
 st.caption(
-    'V5 Institutional: الأسعار اليومية تستخدم آخر Daily Close '
-    'متاح من Yahoo/yfinance عند توفره، والبيانات المالية تستخدم '
-    'TTM من آخر 4 أرباع عند توفرها. تقييم الشركات غير المالية '
-    'يعتمد على True FCFF + 3 Scenario DCF + Relative Valuation. '
-    'الشركات المالية/البنوك تحتاج نماذج Equity/Dividend أكثر '
-    'تخصصًا من FCFF. النماذج أدوات تحليلية وليست ضمانًا للنتائج المستقبلية.'
+    "EGX Institutional V5.1 — "
+    "الأسعار الحالية تعتمد على آخر شمعة تاريخية متاحة عند توفرها، "
+    "بدل الاعتماد فقط على currentPrice من Yahoo. "
+    "DCF يستخدم FCFF أكثر اتساقًا، مع سيناريوهات محافظ/Base/متفائل، "
+    "وRelative Valuation باستخدام P/E وP/B. "
+    "النماذج أدوات تحليلية وليست ضمانًا للنتائج المستقبلية."
 )

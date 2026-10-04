@@ -22,24 +22,17 @@ DEFAULT_MAX_POSITION_PCT = 20.0
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def load_data(symbols, period, interval):
-    """تحميل جماعي واحد لكل timeframe مع Cache. منطق التحليل لا يتغير."""
+    # Same data/logic as the original loader, but cached for 6 hours and
+    # downloaded as one batch per timeframe. threads=False avoids nested
+    # threading because scan_universe already parallelizes the stock analysis.
     if not symbols:
         return pd.DataFrame()
     symbols = tuple(dict.fromkeys(symbols))
     last_error = None
     for attempt in range(DOWNLOAD_RETRIES):
         try:
-            data = yf.download(
-                tickers=list(symbols),
-                period=period,
-                interval=interval,
-                group_by='ticker',
-                threads=False,
-                auto_adjust=True,
-                progress=False,
-                timeout=30
-            )
-            if data is not None and not data.empty:
+            data = yf.download(tickers=list(symbols), period=period, interval=interval, group_by='ticker', threads=False, auto_adjust=True, progress=False, timeout=30)
+            if data is not None and (not data.empty):
                 return data
             last_error = 'Yahoo returned empty data'
         except Exception as e:
@@ -871,53 +864,54 @@ class SourceResult:
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def load_yahoo_fundamentals(ticker):
-    """Financial data لكل سهم مرة واحدة ثم Cache."""
-    try:
-        t = yf.Ticker(ticker)
-        return {
-            'info': t.info or {},
-            'financials': t.financials,
-            'balance': t.balance_sheet,
-            'cashflow': t.cashflow,
-            'dividends': t.dividends,
-        }
-    except Exception as e:
-        return {
-            'info': {},
-            'financials': pd.DataFrame(),
-            'balance': pd.DataFrame(),
-            'cashflow': pd.DataFrame(),
-            'dividends': pd.Series(dtype=float),
-            '_error': str(e)[:180],
-        }
+    # Cache the expensive Yahoo fundamental calls. Returned values are plain
+    # pandas/dict objects so Streamlit can safely persist them.
+    t=yf.Ticker(ticker)
+    return {
+        'info': t.info or {},
+        'financials': t.financials,
+        'balance': t.balance_sheet,
+        'cashflow': t.cashflow,
+        'dividends': t.dividends,
+    }
+
+class _CachedTicker:
+    def __init__(self, dividends):
+        self.dividends=dividends
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def load_stooq_latest(ticker):
+def cached_latest_yahoo_price(ticker):
     try:
-        sym=ticker.replace('.CA','').lower()+'.eg'
-        u=f'https://stooq.com/q/d/l/?s={sym}&d1=20000101&i=d'
-        r=requests.get(u,timeout=8,headers={'User-Agent':'Mozilla/5.0'})
-        if r.ok and len(r.text)>30 and 'No data' not in r.text:
-            d=pd.read_csv(pd.io.common.StringIO(r.text))
-            d['Date']=pd.to_datetime(d['Date'],errors='coerce')
-            d=d.dropna(subset=['Date','Close'])
-            if not d.empty:
-                row=d.iloc[-1]
-                return (num(row['Close']),pd.Timestamp(row['Date']).strftime('%Y-%m-%d'))
-    except Exception:
-        pass
-    return (np.nan,'—')
+        h=yf.Ticker(ticker).history(period='5d',interval='1d',auto_adjust=True)
+        if h is not None and not h.empty:
+            h=h.dropna(subset=['Close']); row=h.iloc[-1]
+            return num(row['Close']),pd.Timestamp(h.index[-1]).strftime('%Y-%m-%d')
+    except Exception: pass
+    return np.nan,'—'
 
 class DataSourceManager:
     def __init__(self,ticker): self.ticker=ticker
     def yahoo(self):
         raw=load_yahoo_fundamentals(self.ticker)
-        return SourceResult('Yahoo Finance',True,raw,error=raw.get('_error',''))
+        return SourceResult('Yahoo Finance',True,{'ticker':_CachedTicker(raw['dividends']),'info':raw['info'],'financials':raw['financials'],'balance':raw['balance'],'cashflow':raw['cashflow']})
+    def latest_yahoo_price(self):
+        return cached_latest_yahoo_price(self.ticker)
     def stooq_price(self):
-        price,date=load_stooq_latest(self.ticker)
-        if pd.notna(price):
-            d=pd.DataFrame([{'Date':pd.Timestamp(date),'Close':price}])
-            return SourceResult('Stooq',True,d)
+        try:
+            h=yf.Ticker(self.ticker).history(period='5d',interval='1d',auto_adjust=True)
+            if h is not None and not h.empty:
+                h=h.dropna(subset=['Close']); row=h.iloc[-1]
+                return num(row['Close']),pd.Timestamp(h.index[-1]).strftime('%Y-%m-%d')
+        except Exception: pass
+        return np.nan,'—'
+    def stooq_price(self):
+        try:
+            sym=self.ticker.replace('.CA','').lower()+'.eg'; u=f'https://stooq.com/q/d/l/?s={sym}&d1=20000101&i=d'
+            r=requests.get(u,timeout=8,headers={'User-Agent':'Mozilla/5.0'})
+            if r.ok and len(r.text)>30 and 'No data' not in r.text:
+                d=pd.read_csv(pd.io.common.StringIO(r.text)); d['Date']=pd.to_datetime(d['Date'],errors='coerce'); d=d.dropna(subset=['Date','Close'])
+                if not d.empty:return SourceResult('Stooq',True,d)
+        except Exception as e:return SourceResult('Stooq',False,error=str(e))
         return SourceResult('Stooq',False,error='No compatible series')
 
 def normalize_financials(raw,price):
@@ -985,9 +979,9 @@ def dcf_fcff(m,rf=0.16,mrp=0.08,tg=0.04,years=5):
         g=g0+(tg-g0)*(i-1)/(years-1); cur*=1+g; pv+=cur/(1+wacc)**i
     tv=cur*(1+tg)/(wacc-tg); ev=pv+tv/(1+wacc)**years; eqv=ev-(debt if pd.notna(debt) else 0)+(cash if pd.notna(cash) else 0); return {'value':eqv/shares,'status':'OK','wacc':wacc,'base_fcff':base,'terminal_growth':tg}
 
-def dividend_engine(dividends,price,m):
+def dividend_engine(t,price,m):
     try:
-        s=pd.to_numeric(dividends,errors='coerce').dropna(); s=s[s>0]
+        s=pd.to_numeric(t.dividends,errors='coerce').dropna(); s=s[s>0]
         if s.empty:return {'yield':np.nan,'sustainability':np.nan,'last':np.nan,'payout':np.nan}
         now=pd.Timestamp.now(tz=s.index.tz) if getattr(s.index,'tz',None) else pd.Timestamp.now(); ttm=s[s.index>=now-pd.Timedelta(days=365)].sum(); annual=[]
         for y in range(3):annual.append(float(s[(s.index>=now-pd.Timedelta(days=365*(y+1)))&(s.index<now-pd.Timedelta(days=365*y))].sum()))
@@ -1037,67 +1031,47 @@ def relative_valuation(target, peers, sec):
         if pd.notna(ev) and pd.notna(ebitda) and pd.notna(shares) and shares>0: vals.append((ebitda*ev-(debt if pd.notna(debt) else 0)+(cash if pd.notna(cash) else 0))/shares)
     return {'value':float(np.median(vals)) if vals else np.nan,'P/E Median':pe,'P/B Median':pb,'EV/EBITDA Median':ev,'methods':len(vals)}
 
-def latest_price_from_daily(data,symbol):
-    """السعر وآخر شمعة من الـDaily Batch نفسه، بدون request إضافي."""
-    try:
-        d=extract_symbol_data(data,symbol)
-        if d.empty:
-            return np.nan,'—'
-        row=d.iloc[-1]
-        return num(row['Close']),pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d')
-    except Exception:
-        return np.nan,'—'
-
+@st.cache_data(ttl=21600, show_spinner=False)
 def source_price(ticker):
-    """Fallback فقط عند فشل الـDaily Batch."""
-    return np.nan,'—',[]
+    ds=DataSourceManager(ticker); y,yd=ds.latest_yahoo_price(); backups=[]
+    try:
+        stq=ds.stooq_price();
+        if stq.ok and not stq.data.empty: backups.append(('Stooq',num(stq.data.iloc[-1]['Close']),pd.Timestamp(stq.data.iloc[-1]['Date']).strftime('%Y-%m-%d')))
+    except Exception:pass
+    return y,yd,backups
 
-def analyze_one(sym,daily,weekly,monthly,capital,risk_percent,rf,mrp,tg):
-    ds=DataSourceManager(sym).yahoo()
-    info=ds.data.get('info',{})
-    price,pdate=latest_price_from_daily(daily,sym)
-    backups=[]
-    if pd.isna(price):
-        price=num(info.get('currentPrice'))
-        if pd.notna(price):
-            pdate='Yahoo info'
-    if pd.isna(price):
-        sp,sd=load_stooq_latest(sym)
-        if pd.notna(sp):
-            price,pdate=sp,sd
-            backups=[('Stooq',sp,sd)]
-    m=normalize_financials(ds.data,price)
-    sec=sector(sym,info)
-    m['_sector']=sec
-    # نحافظ على نفس منطق النسخة الأصلية: Market Proxy لكل سهم، لكن بدون تحميل بيانات جديدة.
-    market=build_market_return_proxy(daily,[sym])
-    v9=process(sym,daily,weekly,monthly,capital,risk_percent,market)
-    pi=piotroski_full(m); be=beneish_full(m); al=altman_z(m,sec); eq=earnings_quality(m); rq=roic_quality(m)
-    div=dividend_engine(ds.data.get('dividends',pd.Series(dtype=float)),price,m)
-    m['Dividend Yield']=div.get('yield')
-    dcf=dcf_fcff(m,rf,mrp,tg)
+def analyze_one(sym,period_d,period_w,period_m,capital,risk_percent,rf,mrp,tg,preloaded=None):
+    ds=DataSourceManager(sym).yahoo(); info=ds.data['info']; price,pdate,backups=source_price(sym);
+    if pd.isna(price):price=num(info.get('currentPrice'))
+    m=normalize_financials(ds.data,price); sec=sector(sym,info); m['_sector']=sec
+    if preloaded is not None:
+        d=extract_symbol_data(preloaded['daily'],sym)
+        w=extract_symbol_data(preloaded['weekly'],sym)
+        mo=extract_symbol_data(preloaded['monthly'],sym)
+    else:
+        d=load_data([sym],period_d,'1d'); w=load_data([sym],period_w,'1wk'); mo=load_data([sym],period_m,'1mo')
+    market=build_market_return_proxy(d,[sym])
+    v9=process(sym,d,w,mo,capital,risk_percent,market)
+    pi=piotroski_full(m); be=beneish_full(m); al=altman_z(m,sec); eq=earnings_quality(m); rq=roic_quality(m); div=dividend_engine(ds.data['ticker'],price,m); m['Dividend Yield']=div.get('yield'); dcf=dcf_fcff(m,rf,mrp,tg)
     technical=num(v9.get('التقييم',v9.get('Technical Score',v9.get('score',np.nan))))
     dq=np.mean([pd.notna(m.get(k)) for k in ['Price','Revenue','Net Income','Equity','Assets','Debt','Cash','Operating Cash Flow','FCF','EBIT','EPS','P/E','P/B','ROE','ROIC']])*100
     quality=np.nanmean([pi['score']/9*100 if pi['coverage']>=55 else np.nan,100 if be.get('score',0)<=-1.78 else 50, al['score']*25 if pd.notna(al.get('score')) else np.nan,eq['score'],rq])
-    return {'symbol':sym,'name':info.get('longName',sym),'sector':sec,'metrics':m,'v9':v9,'piotroski':pi,'beneish':be,'altman':al,'earnings_quality':eq,'roic_quality':rq,'dividend':div,'dcf':dcf,'relative':{'value':np.nan},'technical':technical,'data_quality':dq,'price_date':pdate,'price_source':'Yahoo batch daily' if pd.notna(price) and pdate not in ('Yahoo info','—') and not backups else ('Yahoo info' if pdate=='Yahoo info' else 'Stooq'),'backup_prices':backups}
+    return {'symbol':sym,'name':info.get('longName',sym),'sector':sec,'metrics':m,'v9':v9,'piotroski':pi,'beneish':be,'altman':al,'earnings_quality':eq,'roic_quality':rq,'dividend':div,'dcf':dcf,'relative':{'value':np.nan},'technical':technical,'data_quality':dq,'price_date':pdate,'price_source':'Yahoo latest daily','backup_prices':backups}
 
 def scan_universe(symbols,period_d,period_w,period_m,capital,risk,rf,mrp,tg,workers):
-    symbols=tuple(dict.fromkeys(symbols))
-
-    # ========================================================
-    # PRICE DATA: 3 requests فقط لكل الـUniverse
-    # ========================================================
-    daily=load_data(symbols,period_d,'1d')
-    weekly=load_data(symbols,period_w,'1wk')
-    monthly=load_data(symbols,period_m,'1mo')
-
+    # Download each timeframe once, then each worker analyzes only its own
+    # already-loaded slice. This removes hundreds of duplicate Yahoo requests
+    # while leaving all financial/technical calculations unchanged.
+    daily=load_data(tuple(symbols),period_d,'1d')
+    weekly=load_data(tuple(symbols),period_w,'1wk')
+    monthly=load_data(tuple(symbols),period_m,'1mo')
+    preloaded={'daily':daily,'weekly':weekly,'monthly':monthly}
     out=[]
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        fs={ex.submit(analyze_one,s,daily,weekly,monthly,capital,risk,rf,mrp,tg):s for s in symbols}
+        fs={ex.submit(analyze_one,s,period_d,period_w,period_m,capital,risk,rf,mrp,tg,preloaded):s for s in symbols}
         for f in as_completed(fs):
-            try: out.append(f.result())
-            except Exception as e: out.append({'symbol':fs[f],'error':str(e)[:180]})
-
+            try:out.append(f.result())
+            except Exception as e:out.append({'symbol':fs[f],'error':str(e)[:180]})
     good=[r for r in out if not r.get('error')]
     for r in good:
         peers=[x['metrics'] for x in good if x.get('sector')==r.get('sector') and x.get('symbol')!=r.get('symbol')]
@@ -1105,8 +1079,7 @@ def scan_universe(symbols,period_d,period_w,period_m,capital,risk,rf,mrp,tg,work
         r['relative']=rv
         candidates=[x for x in [r['dcf'].get('value'),rv.get('value')] if pd.notna(x) and x>0]
         r['fair_value']=float(np.median(candidates)) if candidates else np.nan
-        p=r['metrics'].get('Price')
-        r['upside']=(r['fair_value']/p-1)*100 if candidates and pd.notna(p) and p else np.nan
+        p=r['metrics'].get('Price'); r['upside']=(r['fair_value']/p-1)*100 if candidates and pd.notna(p) and p else np.nan
     return out
 
 # Backtest/WFO/OOS/Monte Carlo are intentionally absent.

@@ -20,18 +20,15 @@ LIQUIDITY_LOOKBACK = 20
 RS_LOOKBACK = 20
 DEFAULT_MAX_POSITION_PCT = 20.0
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_data(symbols, period, interval):
-    # Same data/logic as the original loader, but cached for 6 hours and
-    # downloaded as one batch per timeframe. threads=False avoids nested
-    # threading because scan_universe already parallelizes the stock analysis.
     if not symbols:
         return pd.DataFrame()
-    symbols = tuple(dict.fromkeys(symbols))
+    symbols = tuple(symbols)
     last_error = None
     for attempt in range(DOWNLOAD_RETRIES):
         try:
-            data = yf.download(tickers=list(symbols), period=period, interval=interval, group_by='ticker', threads=False, auto_adjust=True, progress=False, timeout=30)
+            data = yf.download(tickers=list(symbols), period=period, interval=interval, group_by='ticker', threads=True, auto_adjust=True, progress=False, timeout=30)
             if data is not None and (not data.empty):
                 return data
             last_error = 'Yahoo returned empty data'
@@ -862,41 +859,12 @@ def sector(sym,info):
 class SourceResult:
     source:str; ok:bool; data:Any=None; error:str=''; timestamp:str=''
 
-@st.cache_data(ttl=21600, show_spinner=False)
-def load_yahoo_fundamentals(ticker):
-    # Cache the expensive Yahoo fundamental calls. Returned values are plain
-    # pandas/dict objects so Streamlit can safely persist them.
-    t=yf.Ticker(ticker)
-    return {
-        'info': t.info or {},
-        'financials': t.financials,
-        'balance': t.balance_sheet,
-        'cashflow': t.cashflow,
-        'dividends': t.dividends,
-    }
-
-class _CachedTicker:
-    def __init__(self, dividends):
-        self.dividends=dividends
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def cached_latest_yahoo_price(ticker):
-    try:
-        h=yf.Ticker(ticker).history(period='5d',interval='1d',auto_adjust=True)
-        if h is not None and not h.empty:
-            h=h.dropna(subset=['Close']); row=h.iloc[-1]
-            return num(row['Close']),pd.Timestamp(h.index[-1]).strftime('%Y-%m-%d')
-    except Exception: pass
-    return np.nan,'—'
-
 class DataSourceManager:
     def __init__(self,ticker): self.ticker=ticker
     def yahoo(self):
-        raw=load_yahoo_fundamentals(self.ticker)
-        return SourceResult('Yahoo Finance',True,{'ticker':_CachedTicker(raw['dividends']),'info':raw['info'],'financials':raw['financials'],'balance':raw['balance'],'cashflow':raw['cashflow']})
+        t=yf.Ticker(self.ticker); info=t.info or {}
+        return SourceResult('Yahoo Finance',True,{'ticker':t,'info':info,'financials':t.financials,'balance':t.balance_sheet,'cashflow':t.cashflow})
     def latest_yahoo_price(self):
-        return cached_latest_yahoo_price(self.ticker)
-    def stooq_price(self):
         try:
             h=yf.Ticker(self.ticker).history(period='5d',interval='1d',auto_adjust=True)
             if h is not None and not h.empty:
@@ -1031,7 +999,6 @@ def relative_valuation(target, peers, sec):
         if pd.notna(ev) and pd.notna(ebitda) and pd.notna(shares) and shares>0: vals.append((ebitda*ev-(debt if pd.notna(debt) else 0)+(cash if pd.notna(cash) else 0))/shares)
     return {'value':float(np.median(vals)) if vals else np.nan,'P/E Median':pe,'P/B Median':pb,'EV/EBITDA Median':ev,'methods':len(vals)}
 
-@st.cache_data(ttl=21600, show_spinner=False)
 def source_price(ticker):
     ds=DataSourceManager(ticker); y,yd=ds.latest_yahoo_price(); backups=[]
     try:
@@ -1040,17 +1007,11 @@ def source_price(ticker):
     except Exception:pass
     return y,yd,backups
 
-def analyze_one(sym,period_d,period_w,period_m,capital,risk_percent,rf,mrp,tg,preloaded=None):
+def analyze_one(sym,period_d,period_w,period_m,capital,risk_percent,rf,mrp,tg):
     ds=DataSourceManager(sym).yahoo(); info=ds.data['info']; price,pdate,backups=source_price(sym);
     if pd.isna(price):price=num(info.get('currentPrice'))
     m=normalize_financials(ds.data,price); sec=sector(sym,info); m['_sector']=sec
-    if preloaded is not None:
-        d=extract_symbol_data(preloaded['daily'],sym)
-        w=extract_symbol_data(preloaded['weekly'],sym)
-        mo=extract_symbol_data(preloaded['monthly'],sym)
-    else:
-        d=load_data([sym],period_d,'1d'); w=load_data([sym],period_w,'1wk'); mo=load_data([sym],period_m,'1mo')
-    market=build_market_return_proxy(d,[sym])
+    d=load_data([sym],period_d,'1d'); w=load_data([sym],period_w,'1wk'); mo=load_data([sym],period_m,'1mo'); market=build_market_return_proxy(d,[sym])
     v9=process(sym,d,w,mo,capital,risk_percent,market)
     pi=piotroski_full(m); be=beneish_full(m); al=altman_z(m,sec); eq=earnings_quality(m); rq=roic_quality(m); div=dividend_engine(ds.data['ticker'],price,m); m['Dividend Yield']=div.get('yield'); dcf=dcf_fcff(m,rf,mrp,tg)
     technical=num(v9.get('التقييم',v9.get('Technical Score',v9.get('score',np.nan))))
@@ -1059,16 +1020,9 @@ def analyze_one(sym,period_d,period_w,period_m,capital,risk_percent,rf,mrp,tg,pr
     return {'symbol':sym,'name':info.get('longName',sym),'sector':sec,'metrics':m,'v9':v9,'piotroski':pi,'beneish':be,'altman':al,'earnings_quality':eq,'roic_quality':rq,'dividend':div,'dcf':dcf,'relative':{'value':np.nan},'technical':technical,'data_quality':dq,'price_date':pdate,'price_source':'Yahoo latest daily','backup_prices':backups}
 
 def scan_universe(symbols,period_d,period_w,period_m,capital,risk,rf,mrp,tg,workers):
-    # Download each timeframe once, then each worker analyzes only its own
-    # already-loaded slice. This removes hundreds of duplicate Yahoo requests
-    # while leaving all financial/technical calculations unchanged.
-    daily=load_data(tuple(symbols),period_d,'1d')
-    weekly=load_data(tuple(symbols),period_w,'1wk')
-    monthly=load_data(tuple(symbols),period_m,'1mo')
-    preloaded={'daily':daily,'weekly':weekly,'monthly':monthly}
     out=[]
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        fs={ex.submit(analyze_one,s,period_d,period_w,period_m,capital,risk,rf,mrp,tg,preloaded):s for s in symbols}
+        fs={ex.submit(analyze_one,s,period_d,period_w,period_m,capital,risk,rf,mrp,tg):s for s in symbols}
         for f in as_completed(fs):
             try:out.append(f.result())
             except Exception as e:out.append({'symbol':fs[f],'error':str(e)[:180]})

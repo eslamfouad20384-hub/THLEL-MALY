@@ -1,580 +1,356 @@
 # -*- coding: utf-8 -*-
-"""EGX Banks Financial Intelligence PRO
-Version 1.2 — daily-candle price source
-Financial analysis only; public data may be incomplete or delayed.
+"""EGX Banks Financial Intelligence PRO v1.3
+Bank-focused fundamentals, source lineage, annual/quarterly trends, and explicit blanks.
+Public-source limitations are shown rather than silently inventing data.
 """
-
-import math
-import time
+import math, re, time
 from datetime import datetime, date, time as dt_time
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
+from bs4 import BeautifulSoup
 
-APP_VERSION = "1.2 Daily Candle Price"
+APP_VERSION = "1.3 Bank Metrics + Lineage"
 CACHE_TTL = 1800
 CAIRO_TZ = ZoneInfo("Africa/Cairo")
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; EGXFinancialResearch/1.0)"}
 
-st.set_page_config(
-    page_title="EGX Banks Financial Intelligence PRO",
-    page_icon="🏦",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="EGX Banks Financial Intelligence PRO", page_icon="🏦", layout="wide", initial_sidebar_state="collapsed")
 
 BANKS = (
-    {"symbol": "COMI.CA", "name": "البنك التجاري الدولي - CIB", "short": "CIB"},
-    {"symbol": "HDBK.CA", "name": "بنك التعمير والإسكان", "short": "HDBK"},
-    {"symbol": "ADIB.CA", "name": "مصرف أبوظبي الإسلامي - مصر", "short": "ADIB"},
-    {"symbol": "CIEB.CA", "name": "بنك قناة السويس", "short": "CIEB"},
-    {"symbol": "QNBA.CA", "name": "بنك قطر الوطني الأهلي", "short": "QNBA"},
-    {"symbol": "FAIT.CA", "name": "بنك فيصل الإسلامي المصري", "short": "FAIT"},
-    {"symbol": "EXPA.CA", "name": "البنك المصري لتنمية الصادرات", "short": "EXPA"},
-    {"symbol": "EGBE.CA", "name": "البنك المصري الخليجي", "short": "EGBE"},
-    {"symbol": "SAUD.CA", "name": "بنك الشركة المصرفية العربية الدولية", "short": "SAUD"},
-    {"symbol": "CANA.CA", "name": "بنك قناة السويس/رمز يحتاج تحقق", "short": "CANA"},
+    {"symbol":"COMI.CA", "name":"البنك التجاري الدولي - CIB", "short":"CIB", "official":"https://www.cibeg.com/"},
+    {"symbol":"HDBK.CA", "name":"بنك التعمير والإسكان", "short":"HDBK", "official":"https://www.hdb-egy.com/"},
+    {"symbol":"ADIB.CA", "name":"مصرف أبوظبي الإسلامي - مصر", "short":"ADIB", "official":"https://www.adib.eg/"},
+    {"symbol":"CIEB.CA", "name":"بنك قناة السويس", "short":"CIEB", "official":"https://www.scbank.com.eg/"},
+    {"symbol":"QNBA.CA", "name":"بنك قطر الوطني الأهلي", "short":"QNBA", "official":"https://www.qnbalahli.com/"},
+    {"symbol":"FAIT.CA", "name":"بنك فيصل الإسلامي المصري", "short":"FAIT", "official":"https://www.faisalbank.com.eg/"},
+    {"symbol":"EXPA.CA", "name":"البنك المصري لتنمية الصادرات", "short":"EXPA", "official":"https://www.ebank.com.eg/"},
+    {"symbol":"EGBE.CA", "name":"البنك المصري الخليجي", "short":"EGBE", "official":"https://www.eg-bank.com/"},
+    {"symbol":"SAUD.CA", "name":"بنك الشركة المصرفية العربية الدولية", "short":"SAUD", "official":"https://www.saib.com.eg/"},
+    # Kept visible but marked for symbol verification rather than silently removed.
+    {"symbol":"CANA.CA", "name":"رمز CANA — يحتاج تحققًا من البورصة", "short":"CANA", "official":"https://www.cbe.org.eg/"},
 )
 
-# ---------- Helpers ----------
-def finite_num(value):
+# ---------- helpers ----------
+def num(x):
     try:
-        x = float(value)
-        return x if math.isfinite(x) else np.nan
+        v = float(x)
+        return v if math.isfinite(v) else np.nan
     except (TypeError, ValueError):
         return np.nan
 
+def div(a,b):
+    a,b=num(a),num(b)
+    return a/b if np.isfinite(a) and np.isfinite(b) and b != 0 else np.nan
 
-def safe_div(a, b):
-    a, b = finite_num(a), finite_num(b)
-    if not np.isfinite(a) or not np.isfinite(b) or b == 0:
-        return np.nan
-    return a / b
+def first_row(df, candidates, col=None):
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty: return np.nan
+    lookup = {str(i).strip().lower(): i for i in df.index}
+    for cand in candidates:
+        if cand.lower() in lookup:
+            row = lookup[cand.lower()]
+            try: return num(df.loc[row, col if col is not None else df.columns[0]])
+            except Exception: pass
+    # Match when Yahoo appends labels such as "Net Income From Continuing..."
+    for cand in candidates:
+        for label, original in lookup.items():
+            if cand.lower() in label:
+                try: return num(df.loc[original, col if col is not None else df.columns[0]])
+                except Exception: pass
+    return np.nan
 
+def find_row(df, candidates):
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty: return None
+    lookup = {str(i).strip().lower(): i for i in df.index}
+    for cand in candidates:
+        if cand.lower() in lookup: return lookup[cand.lower()]
+    for cand in candidates:
+        for label, original in lookup.items():
+            if cand.lower() in label: return original
+    return None
 
-def fmt_num(value, decimals=2):
-    x = finite_num(value)
-    return "—" if not np.isfinite(x) else f"{x:,.{decimals}f}"
+def series_values(df, candidates, limit=5):
+    row = find_row(df, candidates)
+    if row is None: return []
+    out=[]
+    for col in list(df.columns)[:limit]:
+        out.append((str(pd.Timestamp(col).date()) if not isinstance(col,str) else col, num(df.loc[row,col])))
+    return out
 
-
-def fmt_pct(value, decimals=1):
-    x = finite_num(value)
-    return "—" if not np.isfinite(x) else f"{x * 100:.{decimals}f}%"
-
-
-def clean_text(value, fallback="غير متاح"):
-    if value is None:
-        return fallback
-    text = str(value).strip()
-    return text if text and text.lower() not in {"none", "nan", "null"} else fallback
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_daily_candle_price(symbol: str):
-    """Return latest completed daily candle close, not Yahoo info/currentPrice.
-
-    EGX normally trades Sunday–Thursday. The current Cairo date is excluded until
-    15:00 Cairo time so an in-progress daily candle is not mislabeled as a close.
-    This still depends on the freshness/completeness of Yahoo Finance data.
-    """
-    now = datetime.now(CAIRO_TZ)
+def safe_history(symbol):
+    now=datetime.now(CAIRO_TZ)
     try:
-        hist = yf.Ticker(symbol).history(
-            period="10d", interval="1d", auto_adjust=False, actions=False,
-            raise_errors=False,
-        )
-        if hist is None or hist.empty or "Close" not in hist.columns:
-            return {"price": np.nan, "date": None, "source": "Yahoo Finance daily OHLC", "status": "فشل تحميل الشموع اليومية"}
+        h=yf.Ticker(symbol).history(period="1mo", interval="1d", auto_adjust=False, actions=False, raise_errors=False)
+        if h is None or h.empty or "Close" not in h: return {"price":np.nan,"price_date":None,"price_source":"Yahoo Finance daily OHLC/Close","price_status":"فشل تحميل الشموع اليومية"}
+        h=h[pd.to_numeric(h["Close"],errors="coerce").gt(0)]
+        eligible=[]
+        for ix,row in h.iterrows():
+            d=pd.Timestamp(ix).date()
+            if d==now.date() and now.time()<dt_time(15,0): continue
+            eligible.append((d,num(row["Close"])))
+        if not eligible: return {"price":np.nan,"price_date":None,"price_source":"Yahoo Finance daily OHLC/Close","price_status":"لا توجد شمعة مكتملة متاحة"}
+        d,p=max(eligible,key=lambda x:x[0]); age=(now.date()-d).days
+        return {"price":p,"price_date":d.isoformat(),"price_source":"Yahoo Finance — Daily OHLC / Close","price_status":"آخر إغلاق يومي متاح" if age<=5 else f"تحذير: الشمعة أقدم من {age} يومًا"}
+    except Exception as e:
+        return {"price":np.nan,"price_date":None,"price_source":"Yahoo Finance daily OHLC/Close","price_status":f"خطأ: {type(e).__name__}"}
 
-        hist = hist.copy()
-        hist = hist.loc[pd.to_numeric(hist["Close"], errors="coerce").notna()]
-        hist = hist.loc[hist["Close"].astype(float) > 0]
-        if hist.empty:
-            return {"price": np.nan, "date": None, "source": "Yahoo Finance daily OHLC", "status": "لا يوجد إغلاق صالح"}
+def statement_periods(df):
+    if df is None or not isinstance(df,pd.DataFrame) or df.empty: return []
+    return [str(pd.Timestamp(c).date()) if not isinstance(c,str) else c for c in df.columns]
 
-        def index_date(idx):
-            ts = pd.Timestamp(idx)
-            if ts.tzinfo is not None:
-                # Daily candles are keyed to the exchange date; preserve that date.
-                return ts.date()
-            return ts.date()
-
-        today_cairo = now.date()
-        eligible = []
-        for idx, row in hist.iterrows():
-            bar_date = index_date(idx)
-            # Exclude today's candle before 15:00 Cairo time, because it may be forming.
-            if bar_date == today_cairo and now.time() < dt_time(15, 0):
-                continue
-            eligible.append((bar_date, float(row["Close"])))
-
-        if not eligible:
-            # If only today's in-progress bar was returned, don't label it as a completed close.
-            return {"price": np.nan, "date": None, "source": "Yahoo Finance daily OHLC", "status": "لا توجد شمعة مكتملة متاحة بعد"}
-
-        bar_date, close_price = max(eligible, key=lambda item: item[0])
-        age_days = (today_cairo - bar_date).days
-        status = "آخر إغلاق يومي متاح" if age_days <= 5 else f"تحذير: آخر شمعة أقدم من {age_days} يومًا"
-        return {
-            "price": close_price,
-            "date": bar_date.isoformat(),
-            "source": "Yahoo Finance — Daily OHLC / Close",
-            "status": status,
-        }
-    except Exception as exc:
-        return {"price": np.nan, "date": None, "source": "Yahoo Finance daily OHLC", "status": f"خطأ تحميل: {type(exc).__name__}"}
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def retrieve_bank_data(bank_definition: tuple, cost_of_equity: float):
-    """Load one bank. Accept tuple pairs or a dict to avoid tuple/dict regression."""
-    if isinstance(bank_definition, dict):
-        bank = dict(bank_definition)
-    else:
-        bank = dict(bank_definition)
-
-    symbol = bank["symbol"]
-    record = {
-        "symbol": symbol,
-        "name": bank.get("name", symbol),
-        "short": bank.get("short", symbol.replace(".CA", "")),
-        "price": np.nan,
-        "price_date": None,
-        "price_source": "Yahoo Finance — Daily OHLC / Close",
-        "price_status": "لم يتم تحميل السعر",
-        "currency": "EGP (تحقق من المصدر)",
-        "market_cap": np.nan,
-        "book_value_per_share": np.nan,
-        "roe": np.nan,
-        "roa": np.nan,
-        "profit_margin": np.nan,
-        "dividend_yield": np.nan,
-        "trailing_pe": np.nan,
-        "price_to_book": np.nan,
-        "total_revenue": np.nan,
-        "net_income": np.nan,
-        "total_assets": np.nan,
-        "total_equity": np.nan,
-        "total_debt": np.nan,
-        "data_quality": 0.0,
-        "data_notes": [],
-        "error": "",
-    }
-
-    # Mandatory price source: latest completed daily candle Close.
-    candle = get_daily_candle_price(symbol)
-    record.update({
-        "price": candle["price"],
-        "price_date": candle["date"],
-        "price_source": candle["source"],
-        "price_status": candle["status"],
-    })
-
+def crawl_official_report_links(url, limit=15):
+    """Discover PDF links from a bank's public official homepage only; does not assert the PDF is parsed/audited."""
     try:
-        ticker = yf.Ticker(symbol)
-        info = {}
-        try:
-            info = ticker.get_info() or {}
-        except Exception:
-            try:
-                info = ticker.info or {}
-            except Exception:
-                info = {}
-
-        # Never use info/currentPrice/regularMarketPrice to override the candle close.
-        mapping = {
-            "currency": "currency",
-            "market_cap": "marketCap",
-            "book_value_per_share": "bookValue",
-            "roe": "returnOnEquity",
-            "roa": "returnOnAssets",
-            "profit_margin": "profitMargins",
-            "dividend_yield": "dividendYield",
-            "trailing_pe": "trailingPE",
-            "price_to_book": "priceToBook",
-            "total_revenue": "totalRevenue",
-            "net_income": "netIncomeToCommon",
-            "total_assets": "totalAssets",
-            "total_equity": "totalStockholderEquity",
-            "total_debt": "totalDebt",
-        }
-        for out_key, info_key in mapping.items():
-            val = info.get(info_key)
-            if out_key == "currency":
-                if val:
-                    record[out_key] = str(val)
-            else:
-                record[out_key] = finite_num(val)
-
-        # Fill missing basic fundamentals from latest annual/quarterly statements where available.
-        try:
-            income = ticker.income_stmt
-            if income is None or income.empty:
-                income = ticker.financials
-            if income is not None and not income.empty:
-                col = income.columns[0]
-                if not np.isfinite(record["total_revenue"]):
-                    for key in ("Total Revenue", "Operating Revenue", "Revenue"):
-                        if key in income.index:
-                            record["total_revenue"] = finite_num(income.loc[key, col]); break
-                if not np.isfinite(record["net_income"]):
-                    for key in ("Net Income", "Net Income Common Stockholders", "Net Income From Continuing Operation Net Minority Interest"):
-                        if key in income.index:
-                            record["net_income"] = finite_num(income.loc[key, col]); break
-        except Exception:
-            record["data_notes"].append("قائمة الدخل غير متاحة من Yahoo Finance")
-
-        try:
-            balance = ticker.balance_sheet
-            if balance is not None and not balance.empty:
-                col = balance.columns[0]
-                for out_key, candidates in {
-                    "total_assets": ("Total Assets",),
-                    "total_equity": ("Stockholders Equity", "Total Stockholder Equity", "Common Stock Equity"),
-                    "total_debt": ("Total Debt", "Long Term Debt", "Current Debt"),
-                }.items():
-                    if not np.isfinite(record[out_key]):
-                        for key in candidates:
-                            if key in balance.index:
-                                record[out_key] = finite_num(balance.loc[key, col]); break
-        except Exception:
-            record["data_notes"].append("الميزانية غير متاحة من Yahoo Finance")
-
-    except Exception as exc:
-        record["error"] = f"{type(exc).__name__}: تعذر تحميل بعض البيانات المالية"
-
-    # Quality measures field coverage, not whether the figures have been independently audited.
-    quality_fields = [
-        "price", "book_value_per_share", "roe", "roa", "profit_margin",
-        "trailing_pe", "price_to_book", "total_revenue", "net_income",
-        "total_assets", "total_equity", "dividend_yield",
-    ]
-    available = sum(np.isfinite(finite_num(record.get(k))) for k in quality_fields)
-    record["data_quality"] = round(100 * available / len(quality_fields), 1)
-    if not np.isfinite(record["price"]):
-        record["data_notes"].append("لم يتوفر سعر إغلاق يومي مكتمل؛ تم ترك السعر فارغًا بدل استخدام سعر قديم من info")
-    if not record["price_date"]:
-        record["data_notes"].append("تاريخ آخر شمعة غير متاح")
-    if record["currency"] not in ("EGP", "EGp"):
-        record["data_notes"].append(f"عملة المصدر: {record['currency']}؛ تحقق من وحدة السعر والقوائم قبل الاعتماد")
-    return record
-
-
-def valuation_engine(r, cost_of_equity):
-    price = finite_num(r.get("price"))
-    bvps = finite_num(r.get("book_value_per_share"))
-    roe = finite_num(r.get("roe"))
-    eps = np.nan
-    net_income = finite_num(r.get("net_income"))
-    market_cap = finite_num(r.get("market_cap"))
-    shares = safe_div(market_cap, price)
-    if np.isfinite(net_income) and np.isfinite(shares) and shares > 0:
-        eps = net_income / shares
-
-    # Justified P/B: simplified bank valuation, not a substitute for audited bank-specific modelling.
-    justified_pb = np.nan
-    if np.isfinite(roe) and cost_of_equity > 0:
-        justified_pb = float(np.clip(roe / cost_of_equity, 0.25, 2.5))
-
-    residual_income_value = np.nan
-    if np.isfinite(bvps) and bvps > 0 and np.isfinite(roe) and cost_of_equity > 0:
-        sustainable_growth = float(np.clip(roe * 0.35, 0.00, 0.08))
-        if cost_of_equity > sustainable_growth:
-            residual_income_value = bvps + ((roe - cost_of_equity) * bvps) / (cost_of_equity - sustainable_growth)
-            residual_income_value = max(0.0, residual_income_value)
-
-    pb_value = justified_pb * bvps if np.isfinite(justified_pb) and np.isfinite(bvps) and bvps > 0 else np.nan
-    pe_value = eps * 7.0 if np.isfinite(eps) and eps > 0 else np.nan
-    candidates = [x for x in (residual_income_value, pb_value, pe_value) if np.isfinite(x) and x > 0]
-    fair = float(np.median(candidates)) if candidates else np.nan
-    low = float(np.percentile(candidates, 25)) if len(candidates) >= 2 else (fair * 0.85 if np.isfinite(fair) else np.nan)
-    high = float(np.percentile(candidates, 75)) if len(candidates) >= 2 else (fair * 1.15 if np.isfinite(fair) else np.nan)
-    return {
-        "eps_estimated": eps,
-        "justified_pb": justified_pb,
-        "pb_value": pb_value,
-        "residual_income_value": residual_income_value,
-        "pe_value": pe_value,
-        "fair_value": fair,
-        "fair_low": low,
-        "fair_high": high,
-        "buy_10": fair * 0.90 if np.isfinite(fair) else np.nan,
-        "buy_20": fair * 0.80 if np.isfinite(fair) else np.nan,
-        "buy_30": fair * 0.70 if np.isfinite(fair) else np.nan,
-        "upside_pct": safe_div(fair, price) - 1 if np.isfinite(fair) and np.isfinite(price) and price > 0 else np.nan,
-        "valuation_methods": len(candidates),
-    }
-
-
-def scenario_engine(r, fair_value):
-    price = finite_num(r.get("price"))
-    roe = finite_num(r.get("roe"))
-    if not np.isfinite(fair_value) or fair_value <= 0:
-        return {"target_3y_bear": np.nan, "target_3y_base": np.nan, "target_3y_bull": np.nan}
-    # Scenario multipliers are transparent assumptions, not forecasts from a full bank model.
-    roe_adj = float(np.clip(roe if np.isfinite(roe) else 0.12, 0.05, 0.25))
-    base_growth = float(np.clip((roe_adj - 0.10) * 0.30, -0.02, 0.06))
-    bear = fair_value * ((1 + min(base_growth, 0.01)) ** 3) * 0.80
-    base = fair_value * ((1 + base_growth) ** 3)
-    bull = fair_value * ((1 + max(base_growth + 0.04, 0.03)) ** 3) * 1.15
-    return {"target_3y_bear": bear, "target_3y_base": base, "target_3y_bull": bull}
-
-
-def score_bank(r, v):
-    parts = []
-    roe = finite_num(r.get("roe"))
-    roa = finite_num(r.get("roa"))
-    dy = finite_num(r.get("dividend_yield"))
-    pb = finite_num(r.get("price_to_book"))
-    if np.isfinite(roe): parts.append(float(np.clip(roe / 0.20, 0, 1)) * 25)
-    if np.isfinite(roa): parts.append(float(np.clip(roa / 0.025, 0, 1)) * 15)
-    if np.isfinite(dy): parts.append(float(np.clip(dy / 0.08, 0, 1)) * 10)
-    if np.isfinite(pb) and pb > 0: parts.append(float(np.clip(1.5 / pb, 0, 1)) * 15)
-    upside = finite_num(v.get("upside_pct"))
-    if np.isfinite(upside): parts.append(float(np.clip((upside + 0.20) / 0.60, 0, 1)) * 20)
-    q = finite_num(r.get("data_quality"))
-    if np.isfinite(q): parts.append(float(np.clip(q / 100, 0, 1)) * 15)
-    # Do not scale incomplete metrics up to 100: missing fields reduce score coverage.
-    max_possible = 25 + 15 + 10 + 15 + 20 + 15
-    actual_weight = sum({"roe":25 if np.isfinite(roe) else 0, "roa":15 if np.isfinite(roa) else 0,
-                         "dy":10 if np.isfinite(dy) else 0, "pb":15 if np.isfinite(pb) and pb > 0 else 0,
-                         "upside":20 if np.isfinite(upside) else 0, "quality":15 if np.isfinite(q) else 0}.values())
-    raw = sum(parts) * max_possible / actual_weight if actual_weight else 0
-    # Data quality penalty prevents sparse records from appearing overly strong.
-    return round(float(np.clip(raw * (0.55 + 0.45 * (q / 100 if np.isfinite(q) else 0)), 0, 100)), 1)
-
-
-def analyze_bank(bank_def, cost_of_equity):
-    # Pass a tuple of pairs into cache-safe function; it normalizes to dict internally.
-    bank_tuple = tuple(sorted(dict(bank_def).items()))
-    r = retrieve_bank_data(bank_tuple, float(cost_of_equity))
-    v = valuation_engine(r, float(cost_of_equity))
-    s = scenario_engine(r, v["fair_value"])
-    result = {**r, **v, **s}
-    result["score"] = score_bank(result, v)
-    price = finite_num(result.get("price"))
-    fair = finite_num(result.get("fair_value"))
-    if not np.isfinite(price): result["recommendation"] = "لا يوجد سعر يومي موثوق"
-    elif not np.isfinite(fair): result["recommendation"] = "بيانات غير كافية للتقييم"
-    elif fair / price >= 1.25: result["recommendation"] = "قيمة محتملة — راجع البيانات"
-    elif fair / price >= 1.05: result["recommendation"] = "مراقبة / تقييم مقبول"
-    elif fair / price < 0.90: result["recommendation"] = "السعر أعلى من القيمة المقدرة"
-    else: result["recommendation"] = "محايد"
-    return result
-
+        resp=requests.get(url,headers=HEADERS,timeout=12)
+        if resp.status_code>=400: return []
+        soup=BeautifulSoup(resp.text,"html.parser")
+        links=[]
+        for a in soup.find_all("a",href=True):
+            href=urljoin(url,a["href"]); label=" ".join(a.get_text(" ",strip=True).split())
+            if ".pdf" in href.lower() or any(k in (label+" "+href).lower() for k in ["annual report","financial statement","financial results","investor relations","القوائم المالية","التقرير السنوي","نتائج الأعمال"]):
+                if href.startswith("http") and href not in links: links.append(href)
+        return links[:limit]
+    except Exception: return []
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def load_all_banks_cached(bank_definitions, cost_of_equity):
-    banks = []
-    for item in bank_definitions:
-        banks.append(dict(item) if isinstance(item, dict) else dict(item))
-    results = []
-    errors = []
+def analyze_one(bank_tuple, cost_equity):
+    b=dict(bank_tuple); symbol=b["symbol"]
+    rec={"symbol":symbol,"name":b["name"],"short":b["short"],"official_home":b.get("official",""),"currency":"", "price":np.nan,"price_date":None,"price_source":"Yahoo Finance — Daily OHLC / Close","price_status":"لم يتم التحميل", "market_cap":np.nan,"book_value_per_share":np.nan,"roe":np.nan,"roa":np.nan,"dividend_yield":np.nan,"trailing_pe":np.nan,"price_to_book":np.nan,"total_revenue":np.nan,"net_income":np.nan,"total_assets":np.nan,"total_equity":np.nan,"total_debt":np.nan,"data_notes":[],"error":""}
+    rec.update(safe_history(symbol))
+    try:
+        t=yf.Ticker(symbol)
+        try: info=t.get_info() or {}
+        except Exception:
+            try: info=t.info or {}
+            except Exception: info={}
+        mapinfo={"currency":"currency","market_cap":"marketCap","book_value_per_share":"bookValue","roe":"returnOnEquity","roa":"returnOnAssets","dividend_yield":"dividendYield","trailing_pe":"trailingPE","price_to_book":"priceToBook","total_revenue":"totalRevenue","net_income":"netIncomeToCommon","total_assets":"totalAssets","total_equity":"totalStockholderEquity","total_debt":"totalDebt"}
+        for out,key in mapinfo.items():
+            val=info.get(key)
+            if out=="currency": rec[out]=str(val) if val else ""
+            else: rec[out]=num(val)
+        # statements: retain raw tables for calculations/trends and record their period ends
+        try: income=t.income_stmt
+        except Exception: income=pd.DataFrame()
+        if income is None or income.empty:
+            try: income=t.financials
+            except Exception: income=pd.DataFrame()
+        try: qincome=t.quarterly_income_stmt
+        except Exception: qincome=pd.DataFrame()
+        try: balance=t.balance_sheet
+        except Exception: balance=pd.DataFrame()
+        try: qbalance=t.quarterly_balance_sheet
+        except Exception: qbalance=pd.DataFrame()
+        try: cash=t.cashflow
+        except Exception: cash=pd.DataFrame()
+        try: qcash=t.quarterly_cashflow
+        except Exception: qcash=pd.DataFrame()
+        rec["income_periods"]="; ".join(statement_periods(income))
+        rec["quarter_periods"]="; ".join(statement_periods(qincome))
+        rec["balance_periods"]="; ".join(statement_periods(balance))
+        rec["cashflow_periods"]="; ".join(statement_periods(cash))
+        # Current-period statement fallbacks
+        if not np.isfinite(rec["total_revenue"]): rec["total_revenue"]=first_row(income,["Total Revenue","Operating Revenue","Revenue"])
+        if not np.isfinite(rec["net_income"]): rec["net_income"]=first_row(income,["Net Income","Net Income Common Stockholders","Net Income From Continuing Operation Net Minority Interest"])
+        if not np.isfinite(rec["total_assets"]): rec["total_assets"]=first_row(balance,["Total Assets"])
+        if not np.isfinite(rec["total_equity"]): rec["total_equity"]=first_row(balance,["Stockholders Equity","Total Stockholder Equity","Common Stock Equity"])
+        if not np.isfinite(rec["total_debt"]): rec["total_debt"]=first_row(balance,["Total Debt","Long Term Debt","Current Debt"])
+        # Bank metric raw components, if provider's statement labels expose them
+        rec["loans_gross"]=first_row(balance,["Loans","Loans Receivable","Gross Loans","Loans and Receivables","Loans And Advances To Customers"])
+        rec["deposits"]=first_row(balance,["Deposits","Customer Deposits","Deposits by Customers","Due to Customers"])
+        rec["npl_amount"]=first_row(balance,["Non Performing Loans","Nonperforming Loans","Impaired Loans","Stage 3 Loans"])
+        rec["loan_loss_allowance"]=first_row(balance,["Allowance for Credit Losses","Allowance for Loan Losses","Loan Loss Reserves","Impairment Allowance","Loss Allowance"])
+        rec["interest_income"]=first_row(income,["Interest Income","Interest And Similar Income"])
+        rec["interest_expense"]=first_row(income,["Interest Expense","Interest And Similar Expense"])
+        rec["noninterest_income"]=first_row(income,["Non Interest Income","Noninterest Income","Fee And Commission Income","Net Fee And Commission Income"])
+        rec["operating_expenses"]=first_row(income,["Operating Expenses","Non Interest Expense","Noninterest Expense","Total Operating Expenses"])
+        rec["cash_from_operations"]=first_row(cash,["Operating Cash Flow","Cash Flow From Continuing Operating Activities","Operating Cash Flow"])
+        rec["capital_expenditure"]=first_row(cash,["Capital Expenditure","Capital Expenditures"])
+        # Annual and quarterly series (the order comes from Yahoo; preserve period labels)
+        rec["annual_revenue_series"]=series_values(income,["Total Revenue","Operating Revenue","Revenue"],5)
+        rec["annual_profit_series"]=series_values(income,["Net Income","Net Income Common Stockholders","Net Income From Continuing Operation Net Minority Interest"],5)
+        rec["quarter_revenue_series"]=series_values(qincome,["Total Revenue","Operating Revenue","Revenue"],8)
+        rec["quarter_profit_series"]=series_values(qincome,["Net Income","Net Income Common Stockholders","Net Income From Continuing Operation Net Minority Interest"],8)
+        rec["annual_loans_series"]=series_values(balance,["Loans","Loans Receivable","Gross Loans","Loans and Receivables","Loans And Advances To Customers"],5)
+        rec["annual_deposits_series"]=series_values(balance,["Deposits","Customer Deposits","Deposits by Customers","Due to Customers"],5)
+        rec["quarter_loans_series"]=series_values(qbalance,["Loans","Loans Receivable","Gross Loans","Loans and Receivables","Loans And Advances To Customers"],8)
+        rec["quarter_deposits_series"]=series_values(qbalance,["Deposits","Customer Deposits","Deposits by Customers","Due to Customers"],8)
+        # Source metadata: Yahoo provides statement period-end columns, but not a dependable filing publication date.
+        rec["yahoo_source"]="Yahoo Finance (yfinance: info + financial statements)"
+        rec["financial_period_end"]=(statement_periods(income) or statement_periods(balance) or [None])[0]
+        rec["publication_date"]="غير متاح من Yahoo Finance"
+        # Derived ratios only if their raw inputs are available and compatible
+        rec["LDR"]=div(rec["loans_gross"],rec["deposits"])
+        rec["NPL_ratio"]=div(rec["npl_amount"],rec["loans_gross"])
+        rec["provision_coverage"]=div(rec["loan_loss_allowance"],rec["npl_amount"])
+        rec["cost_income"]=div(rec["operating_expenses"], rec["interest_income"]-rec["interest_expense"]+rec["noninterest_income"])
+        # NIM proxy: net interest income / average total assets, not average earning assets. Explicitly labelled proxy.
+        prev_assets=num(balance.iloc[balance.index.get_loc(find_row(balance,["Total Assets"])) ,1]) if False else np.nan
+        assets_series=series_values(balance,["Total Assets"],2)
+        avg_assets=np.mean([v for _,v in assets_series[:2] if np.isfinite(v)]) if sum(np.isfinite(v) for _,v in assets_series[:2])>=2 else np.nan
+        rec["NIM_proxy"]=div(rec["interest_income"]-rec["interest_expense"],avg_assets)
+        # Cash flow-to-profit indicator; banks' cash flow is volatile and not directly comparable to non-financial firms.
+        rec["CFO_to_profit"]=div(rec["cash_from_operations"],rec["net_income"])
+        # Official/regulatory ratios are NOT safely inferable from generic balance sheets; leave blank until parsed from official reports.
+        for k in ["NIM_official","NPL_official","provision_coverage_official","CAR","LCR","cost_income_official","official_revenue","official_net_income","official_loans","official_deposits"]: rec[k]=np.nan
+        rec["official_report_date"]="غير مستخرج تلقائيًا"
+        rec["official_report_source"]="الموقع الرسمي للبنك؛ راجع رابط المصدر أدناه"
+        rec["official_match_status"]="لم تتم مطابقة رقمية آلية لملف رسمي"
+        if not np.isfinite(rec["loans_gross"]): rec["data_notes"].append("القروض غير متاحة بوضوح في قوائم Yahoo؛ LDR سيظل فارغًا")
+        if not np.isfinite(rec["deposits"]): rec["data_notes"].append("الودائع غير متاحة بوضوح في قوائم Yahoo؛ LDR سيظل فارغًا")
+        if not np.isfinite(rec["npl_amount"]): rec["data_notes"].append("NPL غالبًا يحتاج إفصاحًا رسميًا؛ لم يتم اختلاقه")
+    except Exception as e:
+        rec["error"]=f"{type(e).__name__}: تعذر تحميل بعض البيانات المالية"
+        rec["data_notes"].append("تعذر تحميل القوائم المالية من Yahoo Finance")
+    # Valuation retained, with bank-model caveats
+    price,bvps,roe,ni,mc=[num(rec.get(k)) for k in ["price","book_value_per_share","roe","net_income","market_cap"]]
+    shares=div(mc,price); eps=div(ni,shares)
+    pbj=np.clip(roe/cost_equity,0.25,2.5) if np.isfinite(roe) and cost_equity>0 else np.nan
+    growth=float(np.clip(roe*0.35,0,0.08)) if np.isfinite(roe) else np.nan
+    ri=np.nan
+    if np.isfinite(bvps) and bvps>0 and np.isfinite(roe) and np.isfinite(growth) and cost_equity>growth:
+        ri=max(0,bvps+((roe-cost_equity)*bvps)/(cost_equity-growth))
+    pbv=pbj*bvps if np.isfinite(pbj) and np.isfinite(bvps) and bvps>0 else np.nan
+    pev=eps*7 if np.isfinite(eps) and eps>0 else np.nan
+    vals=[x for x in [ri,pbv,pev] if np.isfinite(x) and x>0]
+    fair=float(np.median(vals)) if vals else np.nan
+    rec.update({"eps_estimated":eps,"justified_pb":pbj,"pb_value":pbv,"residual_income_value":ri,"pe_value":pev,"fair_value":fair,"fair_low":float(np.percentile(vals,25)) if len(vals)>=2 else fair*0.85 if np.isfinite(fair) else np.nan,"fair_high":float(np.percentile(vals,75)) if len(vals)>=2 else fair*1.15 if np.isfinite(fair) else np.nan,"buy_10":fair*.9 if np.isfinite(fair) else np.nan,"buy_20":fair*.8 if np.isfinite(fair) else np.nan,"buy_30":fair*.7 if np.isfinite(fair) else np.nan,"upside_pct":div(fair,price)-1 if np.isfinite(fair) and np.isfinite(price) and price>0 else np.nan,"valuation_methods":len(vals)})
+    roe,roa,dy,pb,up=[num(rec.get(k)) for k in ["roe","roa","dividend_yield","price_to_book","upside_pct"]]
+    components=[]; weights=[]
+    for value,den,w in [(roe,.20,25),(roa,.025,15),(dy,.08,10)]:
+        if np.isfinite(value): components.append(float(np.clip(value/den,0,1))*w); weights.append(w)
+    if np.isfinite(pb) and pb>0: components.append(float(np.clip(1.5/pb,0,1))*15); weights.append(15)
+    if np.isfinite(up): components.append(float(np.clip((up+.2)/.6,0,1))*20); weights.append(20)
+    qfields=["price","book_value_per_share","roe","roa","trailing_pe","price_to_book","total_revenue","net_income","total_assets","total_equity","dividend_yield","loans_gross","deposits","interest_income","interest_expense"]
+    available=sum(np.isfinite(num(rec.get(k))) for k in qfields); q=round(100*available/len(qfields),1); rec["data_quality"]=q
+    if weights: raw=sum(components)*75/sum(weights)+15*q/100
+    else: raw=15*q/100
+    rec["score"]=round(float(np.clip(raw*(.55+.45*q/100),0,100)),1)
+    if not np.isfinite(price): rec["recommendation"]="لا يوجد سعر يومي موثوق"
+    elif not np.isfinite(fair): rec["recommendation"]="بيانات غير كافية للتقييم"
+    elif fair/price>=1.25: rec["recommendation"]="قيمة محتملة — راجع البيانات"
+    elif fair/price>=1.05: rec["recommendation"]="مراقبة / تقييم مقبول"
+    elif fair/price<.90: rec["recommendation"]="السعر أعلى من القيمة المقدرة"
+    else: rec["recommendation"]="محايد"
+    # Scenarios: assumptions only
+    ra=float(np.clip(roe if np.isfinite(roe) else .12,.05,.25)); g=float(np.clip((ra-.10)*.30,-.02,.06)) if np.isfinite(fair) else np.nan
+    rec["target_3y_bear"]=fair*((1+min(g,.01))**3)*.8 if np.isfinite(fair) else np.nan
+    rec["target_3y_base"]=fair*((1+g)**3) if np.isfinite(fair) else np.nan
+    rec["target_3y_bull"]=fair*((1+max(g+.04,.03))**3)*1.15 if np.isfinite(fair) else np.nan
+    return rec
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def load_all(bank_defs, cost_equity):
+    results=[]; errors=[]
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(analyze_bank, bank, cost_of_equity): bank for bank in banks}
-        for future in as_completed(futures):
-            bank = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as exc:
-                errors.append({"symbol": bank.get("symbol", "?"), "error": type(exc).__name__})
-    return results, errors
+        futs={pool.submit(analyze_one,tuple(sorted(dict(b).items())),float(cost_equity)):b for b in bank_defs}
+        for f in as_completed(futs):
+            b=futs[f]
+            try: results.append(f.result())
+            except Exception as e: errors.append({"symbol":b.get("symbol","?"),"error":type(e).__name__})
+    return results,errors
 
+def fmt(v, dec=2):
+    x=num(v); return "" if not np.isfinite(x) else round(x,dec)
+def pct(v):
+    x=num(v); return "" if not np.isfinite(x) else round(x*100,2)
+def series_text(x):
+    if not x: return ""
+    return " | ".join(f"{p}: {v:,.0f}" for p,v in x if np.isfinite(v))
+def growth_latest(series):
+    """Latest period versus immediately previous period (annual YoY for annual series; quarterly QoQ for quarterly series)."""
+    vals=[(p,num(v)) for p,v in series if np.isfinite(num(v))]
+    if len(vals)<2 or vals[1][1]==0: return np.nan
+    return vals[0][1]/vals[1][1]-1
 
-def make_display_df(records):
-    rows = []
+def growth_quarter_yoy(series):
+    """Latest quarter versus the same quarter about one year earlier, if at least five quarters exist."""
+    vals=[(p,num(v)) for p,v in series if np.isfinite(num(v))]
+    if len(vals)<5 or vals[4][1]==0: return np.nan
+    return vals[0][1]/vals[4][1]-1
+
+def build_table(records):
+    rows=[]
     for r in records:
+        ar=r.get("annual_revenue_series",[]); ap=r.get("annual_profit_series",[]); qr=r.get("quarter_revenue_series",[]); qp=r.get("quarter_profit_series",[])
+        al=r.get("annual_loans_series",[]); ad=r.get("annual_deposits_series",[]); ql=r.get("quarter_loans_series",[]); qd=r.get("quarter_deposits_series",[])
         rows.append({
-            "الترتيب": 0,
-            "البنك": r.get("name"),
-            "الرمز": r.get("symbol"),
-            "السعر (إغلاق يومي)": r.get("price"),
-            "تاريخ الشمعة": r.get("price_date"),
-            "حالة السعر": r.get("price_status"),
-            "القيمة العادلة التقديرية": r.get("fair_value"),
-            "قيمة عادلة - منخفض": r.get("fair_low"),
-            "قيمة عادلة - مرتفع": r.get("fair_high"),
-            "شراء بخصم 10%": r.get("buy_10"),
-            "شراء بخصم 20%": r.get("buy_20"),
-            "شراء بخصم 30%": r.get("buy_30"),
-            "العائد المحتمل": r.get("upside_pct"),
-            "ROE": r.get("roe"),
-            "ROA": r.get("roa"),
-            "القيمة الدفترية للسهم": r.get("book_value_per_share"),
-            "P/B من المصدر": r.get("price_to_book"),
-            "عائد التوزيعات": r.get("dividend_yield"),
-            "النتيجة / 100": r.get("score"),
-            "جودة البيانات %": r.get("data_quality"),
-            "التوصيف": r.get("recommendation"),
+          "الترتيب":0,"البنك":r.get("name"),"الرمز":r.get("symbol"),"السعر - إغلاق يومي":r.get("price"),"تاريخ الشمعة":r.get("price_date"),"حالة السعر":r.get("price_status"),
+          "القيمة العادلة التقديرية":r.get("fair_value"),"شراء بخصم 20%":r.get("buy_20"),"العائد المحتمل %":pct(r.get("upside_pct")),"النتيجة /100":r.get("score"),"جودة البيانات %":r.get("data_quality"),
+          "NIM منشور %":pct(r.get("NIM_official")),"NIM تقديري بديل %":pct(r.get("NIM_proxy")),"LDR %":pct(r.get("LDR")),"NPL %":pct(r.get("NPL_ratio")),"قيمة القروض المتعثرة":r.get("npl_amount"),"مخصصات خسائر الائتمان":r.get("loan_loss_allowance"),"تغطية المخصصات لـNPL %":pct(r.get("provision_coverage")),"CAR كفاية رأس المال %":pct(r.get("CAR")),"LCR تغطية السيولة %":pct(r.get("LCR")),"Cost-to-Income %":pct(r.get("cost_income")),
+          "القروض الحالية":r.get("loans_gross"),"الودائع الحالية":r.get("deposits"),"تطور القروض سنويًا":series_text(al),"تطور الودائع سنويًا":series_text(ad),"تطور القروض ربع سنويًا":series_text(ql),"تطور الودائع ربع سنويًا":series_text(qd),
+          "الإيرادات الحالية":r.get("total_revenue"),"نمو الإيرادات سنوي %":pct(growth_latest(ar)),"نمو الإيرادات ربع مقابل السابق %":pct(growth_latest(qr)),"نمو الإيرادات ربع سنوي مقابل نفس الربع العام السابق %":pct(growth_quarter_yoy(qr)),"صافي الربح الحالي":r.get("net_income"),"نمو الربح سنوي %":pct(growth_latest(ap)),"نمو الربح ربع مقابل السابق %":pct(growth_latest(qp)),"نمو الربح ربع سنوي مقابل نفس الربع العام السابق %":pct(growth_quarter_yoy(qp)),"التدفق النقدي التشغيلي":r.get("cash_from_operations"),"التدفق التشغيلي/صافي الربح %":pct(r.get("CFO_to_profit")),
+          "نهاية الفترة المالية":r.get("financial_period_end"),"تاريخ نشر القائمة":r.get("publication_date"),"مصدر البيانات الخام":r.get("yahoo_source"),"المصدر الرسمي للبنك":r.get("official_home"),"بوابة إفصاحات البورصة المصرية":"https://www.egx.com.eg/","تاريخ التقرير الرسمي":r.get("official_report_date"),"حالة المطابقة الرسمية":r.get("official_match_status"),"التوصيف":r.get("recommendation"),"ملاحظات": "؛ ".join(r.get("data_notes",[]))
         })
-    # Keep a stable schema even when no bank result was returned.
-    display_columns = [
-        "الترتيب", "البنك", "الرمز", "السعر (إغلاق يومي)", "تاريخ الشمعة",
-        "حالة السعر", "القيمة العادلة التقديرية", "قيمة عادلة - منخفض",
-        "قيمة عادلة - مرتفع", "شراء بخصم 10%", "شراء بخصم 20%",
-        "شراء بخصم 30%", "العائد المحتمل", "ROE", "ROA",
-        "القيمة الدفترية للسهم", "P/B من المصدر", "عائد التوزيعات",
-        "النتيجة / 100", "جودة البيانات %", "التوصيف",
-    ]
-    df = pd.DataFrame(rows, columns=display_columns)
-    if df.empty:
-        return df
-
-    # BUG FIX: score/data_quality are raw-record keys, not DataFrame column names.
-    # The display table uses Arabic labels, so sort by those actual labels.
-    for col in ("النتيجة / 100", "جودة البيانات %"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.sort_values(
-        by=["النتيجة / 100", "جودة البيانات %"],
-        ascending=[False, False],
-        na_position="last",
-        kind="mergesort",
-    ).reset_index(drop=True)
-    df["الترتيب"] = np.arange(1, len(df) + 1)
+    df=pd.DataFrame(rows)
+    if df.empty: return df
+    for c in ["النتيجة /100","جودة البيانات %"]: df[c]=pd.to_numeric(df[c],errors="coerce")
+    df=df.sort_values(["النتيجة /100","جودة البيانات %"],ascending=[False,False],na_position="last").reset_index(drop=True)
+    df["الترتيب"]=np.arange(1,len(df)+1)
     return df
 
-
 # ---------- UI ----------
-st.markdown("""
-<style>
-html, body, [class*="css"] { direction: rtl; text-align: right; }
-.block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1500px;}
-.hero {padding: 1.2rem 1.4rem; border-radius: 16px; background: linear-gradient(120deg,#102a43,#176b87); color: white; margin-bottom: 1rem;}
-.hero h1 {color:white; margin:0;}
-.small-note {font-size:0.88rem; color:#64748b;}
-</style>
-<div class="hero"><h1>🏦 EGX Banks Financial Intelligence PRO</h1><p>محرك مالي للبنوك المصرية — السعر من آخر شمعة يومية مكتملة، دون الاعتماد على currentPrice.</p></div>
-""", unsafe_allow_html=True)
-
-st.warning("تنبيه: البيانات العامة قد تكون ناقصة أو متأخرة. التقييمات تقديرية وليست توصية شراء أو بيع. تحقق من القوائم المالية المنشورة وإفصاحات البورصة قبل اتخاذ قرار.")
-
-with st.expander("⚙️ إعدادات التقييم", expanded=False):
-    cost_of_equity_pct = st.slider("تكلفة حقوق الملكية المفترضة (%)", min_value=15, max_value=35, value=25, step=1)
-    cache_refresh = st.button("🔄 تحديث البيانات الآن (مسح الكاش)")
-    if cache_refresh:
-        st.cache_data.clear()
-        st.rerun()
-    st.caption("تكلفة حقوق الملكية افتراض يغيّر التقييم؛ ليست قيمة منشورة من البنك.")
-
-cost_of_equity = cost_of_equity_pct / 100
-if st.button("🚀 تحميل وتحليل البنوك", type="primary", use_container_width=True):
-    st.session_state["run_bank_scan"] = True
-
-if st.session_state.get("run_bank_scan", False):
-    with st.spinner("جاري تحميل الشموع اليومية والبيانات المالية المتاحة..."):
-        bank_definitions = tuple(tuple(sorted(bank.items())) for bank in BANKS)
-        records, errors = load_all_banks_cached(bank_definitions, cost_of_equity)
-    df = make_display_df(records)
-    st.session_state["bank_records"] = records
-    st.session_state["bank_df"] = df
-    st.session_state["bank_errors"] = errors
-
-if "bank_df" not in st.session_state:
-    st.info("اضغط «تحميل وتحليل البنوك» لبدء جلب البيانات تلقائيًا.")
+st.markdown("""<style>html,body,[class*='css']{direction:rtl;text-align:right}.block-container{padding-top:1rem;max-width:1800px}.hero{padding:1rem 1.3rem;border-radius:15px;background:linear-gradient(120deg,#102a43,#176b87);color:#fff;margin-bottom:1rem}.hero h1{color:#fff;margin:0}.small{font-size:.85rem;color:#64748b}</style><div class='hero'><h1>🏦 EGX Banks Financial Intelligence PRO</h1><p>تحليل مالي للبنوك + نسب مخاطر + اتجاهات سنوية وربع سنوية + مصدر وتاريخ لكل رقم متاح</p></div>""",unsafe_allow_html=True)
+st.warning("مهم: الحقول غير المتاحة تظهر فارغة، ولا يتم اختلاق نسب رقابية مثل CAR وLCR أو NPL. بيانات Yahoo ليست بديلًا عن القوائم الرسمية، والمقارنة الرسمية الرقمية لا تعتبر مكتملة إلا عند استخراج التقرير والتحقق منه.")
+with st.expander("⚙️ إعدادات",expanded=False):
+    ce=st.slider("تكلفة حقوق الملكية المفترضة %",15,35,25,1)/100
+    if st.button("🔄 مسح الكاش وتحديث البيانات"): st.cache_data.clear(); st.rerun()
+    st.caption("NIM البديل محسوب على متوسط إجمالي الأصول عند توفر سنتين، وليس متوسط الأصول المدرة للفائدة؛ لذلك يُعرض منفصلًا عن NIM المنشور.")
+if st.button("🚀 تحميل وتحليل البنوك",type="primary",use_container_width=True): st.session_state["run_scan"]=True
+if st.session_state.get("run_scan"):
+    with st.spinner("تحميل الأسعار والقوائم السنوية والربع سنوية المتاحة..."):
+        records,errors=load_all(BANKS,ce)
+        # official home page link discovery is deliberately separate and rate-limited
+        for r in records:
+            r["official_links"]=crawl_official_report_links(r.get("official_home",""),10)
+        st.session_state["records"]=records; st.session_state["errors"]=errors; st.session_state["table"]=build_table(records)
+if "table" not in st.session_state:
+    st.info("اضغط «تحميل وتحليل البنوك» لبدء جلب البيانات.")
 else:
-    df = st.session_state["bank_df"].copy()
-    records = st.session_state.get("bank_records", [])
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("عدد البنوك", len(df))
-    c2.metric("سعر يومي متاح", int(df["السعر (إغلاق يومي)"].apply(lambda x: np.isfinite(finite_num(x))).sum()))
-    c3.metric("قيمة عادلة محسوبة", int(df["القيمة العادلة التقديرية"].apply(lambda x: np.isfinite(finite_num(x))).sum()))
-    c4.metric("متوسط جودة البيانات", f"{df['جودة البيانات %'].mean():.1f}%" if len(df) else "—")
-
-    st.subheader("📊 ترتيب البنوك")
-    display_cols = ["الترتيب", "البنك", "الرمز", "السعر (إغلاق يومي)", "تاريخ الشمعة", "حالة السعر", "القيمة العادلة التقديرية", "شراء بخصم 20%", "العائد المحتمل", "ROE", "القيمة الدفترية للسهم", "النتيجة / 100", "جودة البيانات %", "التوصيف"]
-    st.dataframe(
-        df[display_cols], use_container_width=True, hide_index=True,
-        column_config={
-            "السعر (إغلاق يومي)": st.column_config.NumberColumn(format="%.2f"),
-            "القيمة العادلة التقديرية": st.column_config.NumberColumn(format="%.2f"),
-            "شراء بخصم 20%": st.column_config.NumberColumn(format="%.2f"),
-            "العائد المحتمل": st.column_config.NumberColumn(format="%.1%%"),
-            "ROE": st.column_config.NumberColumn(format="%.1%%"),
-            "القيمة الدفترية للسهم": st.column_config.NumberColumn(format="%.2f"),
-            "النتيجة / 100": st.column_config.NumberColumn(format="%.1f"),
-            "جودة البيانات %": st.column_config.NumberColumn(format="%.1f"),
-        },
-    )
-
-    st.download_button(
-        "⬇️ تنزيل النتائج CSV",
-        data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
-        file_name=f"EGX_Banks_Analysis_{date.today().isoformat()}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    st.subheader("🔎 تقرير بنك بالتفصيل")
-    choices = {f"{r.get('name')} ({r.get('symbol')})": r for r in records}
-    selected = st.selectbox("اختر البنك", list(choices.keys()))
-    r = choices[selected]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("آخر إغلاق يومي", fmt_num(r.get("price")), help=f"تاريخ الشمعة: {r.get('price_date') or 'غير متاح'}")
-    m2.metric("القيمة العادلة التقديرية", fmt_num(r.get("fair_value")))
-    m3.metric("القيمة الدفترية للسهم", fmt_num(r.get("book_value_per_share")))
-    m4.metric("جودة البيانات", f"{fmt_num(r.get('data_quality'), 1)}%")
-
-    st.caption(f"مصدر السعر: {r.get('price_source')} | حالة السعر: {r.get('price_status')} | تاريخ الشمعة: {r.get('price_date') or 'غير متاح'}")
-    if not np.isfinite(finite_num(r.get("price"))):
-        st.error("لم يتم العثور على سعر إغلاق يومي مكتمل. لن يتم استبداله بسعر currentPrice أو سعر من مصدر آخر.")
-    elif r.get("price_date"):
-        try:
-            age = (date.today() - date.fromisoformat(r["price_date"])).days
-            if age > 5:
-                st.warning(f"آخر شمعة متاحة أقدم من المعتاد ({age} يومًا). لا تتعامل مع السعر باعتباره حديثًا قبل التحقق من المصدر.")
-        except Exception:
-            pass
-
-    st.markdown("#### التقييم ومناطق الشراء")
-    valuation_rows = [
-        ("القيمة العادلة التقديرية", r.get("fair_value")),
-        ("نطاق القيمة العادلة - منخفض", r.get("fair_low")),
-        ("نطاق القيمة العادلة - مرتفع", r.get("fair_high")),
-        ("قيمة طريقة P/B", r.get("pb_value")),
-        ("قيمة طريقة Residual Income", r.get("residual_income_value")),
-        ("قيمة P/E (مضاعف افتراضي 7x)", r.get("pe_value")),
-        ("منطقة شراء بخصم 10%", r.get("buy_10")),
-        ("منطقة شراء بخصم 20%", r.get("buy_20")),
-        ("منطقة شراء بخصم 30%", r.get("buy_30")),
-        ("العائد المحتمل مقابل السعر", fmt_pct(r.get("upside_pct"))),
-        ("عدد طرق التقييم المتاحة", r.get("valuation_methods")),
-        ("التقييم الوصفي", r.get("recommendation")),
-    ]
-    st.dataframe(pd.DataFrame(valuation_rows, columns=["البند", "القيمة"]), use_container_width=True, hide_index=True)
-
-    st.markdown("#### سيناريوهات 3 سنوات (افتراضية)")
-    sc1, sc2, sc3 = st.columns(3)
-    sc1.metric("متحفظ", fmt_num(r.get("target_3y_bear")))
-    sc2.metric("أساسي", fmt_num(r.get("target_3y_base")))
-    sc3.metric("متفائل", fmt_num(r.get("target_3y_bull")))
-    st.caption("السيناريوهات ناتجة عن افتراضات مبسطة مرتبطة بالعائد على حقوق الملكية والقيمة العادلة؛ ليست توقعات مضمونة.")
-
-    st.markdown("#### جودة البيانات وملاحظات المصدر")
-    notes = r.get("data_notes") or []
-    if notes:
-        for note in notes:
-            st.write(f"- {note}")
-    else:
-        st.write("لم يتم تسجيل ملاحظات إضافية؛ هذا لا يعني أن البيانات مدققة أو مكتملة.")
-    if r.get("error"):
-        st.warning(r["error"])
-
-    st.subheader("🧾 منهجية المحرك وحدوده")
+    df=st.session_state["table"].copy(); records=st.session_state["records"]
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("عدد الرموز",len(df)); c2.metric("سعر يومي متاح",int(df["السعر - إغلاق يومي"].apply(lambda x:np.isfinite(num(x))).sum())); c3.metric("قروض وودائع متاحة",int((df["القروض الحالية"].notna() & df["الودائع الحالية"].notna()).sum())); c4.metric("متوسط جودة الحقول",f"{df['جودة البيانات %'].mean():.1f}%" if len(df) else "—")
+    st.subheader("📊 الجدول المالي الشامل — الحقول غير المتاحة تظل فارغة")
+    st.caption("استخدم شريط التمرير الأفقي لرؤية كل الأعمدة. نسب CAR وLCR وNPL المنشورة لا تُستنتج من الميزانية العامة؛ تظل فارغة ما لم يتوفر مصدر رسمي موثوق.")
+    st.dataframe(df,use_container_width=True,hide_index=True,height=650)
+    st.download_button("⬇️ تنزيل الجدول الشامل CSV",df.to_csv(index=False,encoding="utf-8-sig").encode("utf-8-sig"),file_name=f"EGX_Banks_Full_Analysis_{date.today().isoformat()}.csv",mime="text/csv",use_container_width=True)
+    st.subheader("🔎 تفاصيل البنك ومصادره")
+    options={f"{r.get('name')} ({r.get('symbol')})":r for r in records}
+    r=options[st.selectbox("اختر البنك",list(options))]
+    st.markdown(f"**الموقع الرسمي:** {r.get('official_home','')}")
+    st.markdown(f"**مصدر البيانات الخام:** {r.get('yahoo_source','Yahoo Finance')}")
+    st.write(f"**نهاية الفترة المالية من القوائم المتاحة:** {r.get('financial_period_end','') or 'غير متاحة'}")
+    st.write(f"**تاريخ نشر القائمة:** {r.get('publication_date','غير متاح من Yahoo Finance')} — هذا التاريخ لا يساوي نهاية الفترة المالية.")
+    st.write(f"**حالة المقارنة الرسمية:** {r.get('official_match_status','')}")
+    links=r.get("official_links",[])
+    if links:
+        st.markdown("**روابط ملفات/صفحات مرشحة من الموقع الرسمي (تحتاج فتحًا والتحقق من كونها أحدث قوائم مالية):**")
+        for link in links: st.markdown(f"- [{link}]({link})")
+    else: st.info("لم يتم اكتشاف رابط تقرير PDF آليًا من الصفحة الرئيسية. افتح الموقع الرسمي وابحث عن Investor Relations / Financial Statements.")
+    st.markdown("#### اتجاهات الإيرادات والأرباح")
+    trend=[]
+    for label,key in [("إيرادات سنوية","annual_revenue_series"),("أرباح سنوية","annual_profit_series"),("إيرادات ربع سنوية","quarter_revenue_series"),("أرباح ربع سنوية","quarter_profit_series"),("قروض سنوية","annual_loans_series"),("ودائع سنوية","annual_deposits_series"),("قروض ربع سنوية","quarter_loans_series"),("ودائع ربع سنوية","quarter_deposits_series")]:
+        vals=r.get(key,[])
+        if vals:
+            for period,value in vals: trend.append({"السلسلة":label,"الفترة":period,"القيمة":value})
+    st.dataframe(pd.DataFrame(trend) if trend else pd.DataFrame(columns=["السلسلة","الفترة","القيمة"]),use_container_width=True,hide_index=True)
+    st.markdown("#### منهجية وحدود مهمة")
     st.markdown("""
-    - **السعر:** آخر `Close` من شمعة يومية على Yahoo Finance. لا يستخدم `info['currentPrice']` لتحديد السعر.
-    - **اكتمال الشمعة:** يتم استبعاد شمعة تاريخ اليوم قبل الساعة 15:00 بتوقيت القاهرة لتجنب شمعة قد تكون قيد التكوين. بيانات المصدر نفسها قد تتأخر.
-    - **القيمة العادلة:** مزيج وسيط من Residual Income وP/B مبرر وP/E بمضاعف افتراضي، فقط عند توافر المدخلات.
-    - **مهم للبنوك:** P/E=7x وتكلفة حقوق الملكية واحتفاظ الأرباح افتراضات قابلة للنقاش؛ يجب تطوير النموذج باستخدام إفصاحات البنك ونموذج قطاعي مدقق.
-    - **البيانات المالية:** Yahoo Finance لا يوفر كل القوائم أو النسب للبنوك المصرية. الخانات الناقصة تظل فارغة ولا يتم اختلاقها.
-    - **الرموز:** القائمة ابتدائية، ويجب التحقق من كل رمز مقابل قائمة EGX الرسمية. بعض الرموز قد لا تعمل أو قد تحتاج تصحيحًا.
-    """)
-
-    if st.session_state.get("bank_errors"):
-        with st.expander("عرض أخطاء التحميل"):
-            st.dataframe(pd.DataFrame(st.session_state["bank_errors"]), use_container_width=True, hide_index=True)
-
-st.markdown("<p class='small-note'>EGX Banks Financial Intelligence PRO · إصدار 1.2 · تحليل معلومات عامة، وليس نصيحة استثمارية.</p>", unsafe_allow_html=True)
+- **NIM البديل** = صافي دخل الفوائد ÷ متوسط إجمالي الأصول، عند توفر المدخلات. هذا ليس NIM الرسمي لأنه يحتاج الأصول المدرة للفائدة.
+- **LDR** = القروض المتاحة ÷ الودائع المتاحة. إذا كانت تسميات Yahoo غير واضحة أو الحقول ناقصة، يظل فارغًا.
+- **NPL ونسبة تغطية المخصصات** يحتاجان قيمة القروض المتعثرة والمخصصات المتوافقة في التعريف والفترة؛ لا تُحسب النسبة من إجمالي القروض أو إجمالي الديون كبديل.
+- **CAR وLCR** نسب رقابية تتطلب إفصاحات رسمية/رقابية، ولا يمكن استنتاجها بأمان من القوائم العامة.
+- **Cost-to-Income** تقديري فقط إذا أمكن تحديد المصروفات التشغيلية ودخل التشغيل بتسميات متوافقة؛ راجع تعريف البنك قبل المقارنة.
+- **نمو سنوي/ربع سنوي:** نمو القوائم السنوية يقارن أحدث سنتين؛ وتظهر القوائم الربع سنوية نمو الربع مقابل الربع السابق، وكذلك مقابل نفس الربع قبل سنة إذا توفرت خمسة أرباع على الأقل.
+- **التدفقات النقدية** معروضة كما ينشرها المزود، لكن التدفق النقدي التشغيلي للبنوك قد يتذبذب بسبب طبيعة الودائع والقروض، فلا يكفي منفردًا للحكم على استدامة الأرباح.
+- **المصدر الرسمي:** التطبيق يحاول اكتشاف روابط من الصفحة الرئيسية للبنك، لكنه لا يدّعي أنه قرأ أو طابق محتوى كل PDF تلقائيًا. حقول المقارنة الرسمية تظل فارغة حتى يتوفر استخراج موثوق.
+- **تاريخ النشر:** Yahoo Finance لا يوفر دائمًا تاريخ نشر القائمة بشكل موثوق؛ لذلك يظهر «غير متاح» بدل استخدام نهاية الفترة المالية كأنها تاريخ نشر.
+""")
+    if st.session_state.get("errors"):
+        with st.expander("أخطاء تحميل عامة"): st.dataframe(pd.DataFrame(st.session_state["errors"]),use_container_width=True,hide_index=True)
+st.markdown(f"<p class='small'>EGX Banks Financial Intelligence PRO · {APP_VERSION} · البيانات العامة قد تكون ناقصة أو متأخرة.</p>",unsafe_allow_html=True)

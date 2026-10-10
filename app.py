@@ -1,28 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-EGX BANKS FINANCIAL INTELLIGENCE PRO
-Automatic Data Engine - Financial Analysis Only
+EGX Banks Financial Intelligence PRO
+Version 1.1 - Tuple Error Fixed
 
-Features:
-- Automatic market-data retrieval via Yahoo Finance / yfinance
-- Automatic financial-statement retrieval when available
-- Official bank website discovery
-- Sector-specific banking metrics
-- P/B, P/E and simplified residual-income valuation
-- Margin-of-safety buy zones
-- Data coverage and confidence assessment
-- Arabic Streamlit dashboard
-- No manual CSV/XLSX upload required
+Automatic financial-data retrieval for Egyptian bank stocks.
+No manual CSV/XLSX upload required.
 
 IMPORTANT:
-Financial statement availability for EGX stocks varies by provider.
-Unavailable values remain missing; they are never fabricated.
+- Data availability depends on external providers.
+- Official website scanning discovers links; it does not
+  guarantee automatic extraction of financial-statement PDFs.
+- Missing data is not fabricated.
+- Valuations are preliminary estimates, not investment advice.
 """
 
-import re
-import time
-import math
 import logging
+import re
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
@@ -44,25 +37,20 @@ except ImportError:
 # ============================================================
 
 APP_NAME = "EGX Banks Financial Intelligence PRO"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1"
 
+CACHE_TTL_SECONDS = 1800
 REQUEST_TIMEOUT = 12
 MAX_WORKERS = 5
-CACHE_TTL_SECONDS = 1800
 
-RISK_FREE_RATE = 0.18
-COST_OF_EQUITY = 0.24
-
-# These are scenario assumptions, not forecasts.
-DEFAULT_GROWTH_BASE = 0.12
+DEFAULT_COST_OF_EQUITY = 0.24
 DEFAULT_GROWTH_LOW = 0.05
+DEFAULT_GROWTH_BASE = 0.12
 DEFAULT_GROWTH_HIGH = 0.18
 
 MARGIN_EXCELLENT = 0.30
 MARGIN_STRONG = 0.20
 MARGIN_ACCEPTABLE = 0.10
-
-MIN_DATA_CONFIDENCE = 35
 
 HEADERS = {
     "User-Agent": (
@@ -80,8 +68,9 @@ LOGGER = logging.getLogger("EGX_BANKS")
 # BANK UNIVERSE
 # ============================================================
 
-# The symbols below are candidates, not a guarantee of current
-# listing status or Yahoo availability. The app reports failures.
+# These are candidate symbols, not a verified live EGX listing feed.
+# Verify symbols against the official exchange listing directory.
+
 BANKS = [
     {
         "symbol": "COMI.CA",
@@ -145,10 +134,6 @@ BANKS = [
     },
 ]
 
-# Explicitly add/remove candidates here only after checking the EGX
-# listing directory. The list should not be treated as the full EGX
-# universe or as an official live listing feed.
-
 
 # ============================================================
 # GENERAL UTILITIES
@@ -159,40 +144,43 @@ def now_utc():
 
 
 def safe_float(value):
-    """Convert a value to a finite float, otherwise NaN."""
     try:
-        if value is None:
+        if value is None or isinstance(value, (dict, list, tuple)):
             return np.nan
 
-        if isinstance(value, (list, tuple, dict)):
+        value = float(value)
+
+        if not np.isfinite(value):
             return np.nan
 
-        x = float(value)
+        return value
 
-        if not np.isfinite(x):
-            return np.nan
-
-        return x
-    except (TypeError, ValueError, OverflowError):
+    except (ValueError, TypeError, OverflowError):
         return np.nan
 
 
 def first_valid(*values):
     for value in values:
-        x = safe_float(value)
-        if not pd.isna(x):
-            return x
+        number = safe_float(value)
+
+        if not pd.isna(number):
+            return number
+
     return np.nan
 
 
 def safe_divide(numerator, denominator):
-    n = safe_float(numerator)
-    d = safe_float(denominator)
+    numerator = safe_float(numerator)
+    denominator = safe_float(denominator)
 
-    if pd.isna(n) or pd.isna(d) or d == 0:
+    if (
+        pd.isna(numerator)
+        or pd.isna(denominator)
+        or denominator == 0
+    ):
         return np.nan
 
-    return n / d
+    return numerator / denominator
 
 
 def clean_text(value):
@@ -203,116 +191,102 @@ def clean_text(value):
 
 
 def fmt_number(value, decimals=2):
-    x = safe_float(value)
+    value = safe_float(value)
 
-    if pd.isna(x):
+    if pd.isna(value):
         return "غير متاح"
 
-    return f"{x:,.{decimals}f}"
+    return f"{value:,.{decimals}f}"
 
 
 def fmt_percent(value, decimals=1):
-    x = safe_float(value)
+    value = safe_float(value)
 
-    if pd.isna(x):
+    if pd.isna(value):
         return "غير متاح"
 
-    return f"{x * 100:.{decimals}f}%"
+    return f"{value * 100:.{decimals}f}%"
 
 
 def fmt_price(value):
-    x = safe_float(value)
-
-    if pd.isna(x):
-        return "غير متاح"
-
-    return f"{x:,.2f}"
+    return fmt_number(value, 2)
 
 
-def get_last_numeric_value(df, row_candidates):
+def empty_statement():
+    return pd.DataFrame()
+
+
+def get_last_numeric_value(statement, keywords):
     """
-    Search financial statement rows using case-insensitive
-    keyword matching and return the latest available value.
+    Retrieve the latest available numeric value matching a
+    statement-row keyword.
 
-    The provider's row labels and column dates are preserved
-    for transparency.
+    Labels and provider conventions may differ. Returned figures
+    require verification against the original financial report.
     """
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+    if (
+        statement is None
+        or not isinstance(statement, pd.DataFrame)
+        or statement.empty
+    ):
         return np.nan
 
     try:
-        columns = list(df.columns)
+        columns = list(statement.columns)
 
-        # Prefer the most recent period, if the columns are dates.
-        try:
-            columns = sorted(columns, reverse=True)
-        except Exception:
-            pass
+        for keyword in keywords:
+            for index in statement.index:
+                label = str(index).lower()
 
-        for keyword in row_candidates:
-            for idx in df.index:
-                label = str(idx).lower()
+                if keyword.lower() not in label:
+                    continue
 
-                if keyword.lower() in label:
-                    row = df.loc[idx]
+                row = statement.loc[index]
 
-                    if isinstance(row, pd.DataFrame):
-                        row = row.iloc[0]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
 
-                    for col in columns:
-                        if col not in row.index:
-                            continue
+                for column in columns:
+                    if column not in row.index:
+                        continue
 
-                        value = safe_float(row[col])
+                    value = safe_float(row[column])
 
-                        if not pd.isna(value):
-                            return value
+                    if not pd.isna(value):
+                        return value
 
-        return np.nan
     except Exception:
-        return np.nan
+        LOGGER.exception("Statement-row extraction failed")
+
+    return np.nan
 
 
 def safe_get_info(ticker):
     try:
         return ticker.info or {}
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("Ticker info unavailable: %s", exc)
         return {}
 
 
-def safe_get_statement(ticker, statement_name):
-    """
-    yfinance changes and provider availability may affect
-    statement retrieval. Return an empty frame on failure.
-    """
+def safe_get_statement(ticker, attribute):
     try:
-        statement = getattr(ticker, statement_name)
+        result = getattr(ticker, attribute)
 
-        if isinstance(statement, pd.DataFrame):
-            return statement
+        if isinstance(result, pd.DataFrame):
+            return result
 
     except Exception as exc:
-        LOGGER.info(
-            "Statement retrieval failed for %s: %s",
-            statement_name,
-            exc,
-        )
+        LOGGER.info("%s unavailable: %s", attribute, exc)
 
-    return pd.DataFrame()
+    return empty_statement()
 
 
 # ============================================================
-# OFFICIAL WEBSITE DISCOVERY
+# OFFICIAL WEBSITE LINK DISCOVERY
 # ============================================================
 
 def discover_official_financial_pages(base_url):
-    """
-    Inspect the supplied official website for links whose text
-    or URL suggests investor relations or financial reports.
-
-    This is discovery only. It does not guarantee that PDFs can
-    be parsed or that the documents contain machine-readable data.
-    """
     result = {
         "website_status": "لم يتم الفحص",
         "investor_links": [],
@@ -333,7 +307,7 @@ def discover_official_financial_pages(base_url):
 
         if response.status_code >= 400:
             result["website_status"] = (
-                f"تعذر الوصول: HTTP {response.status_code}"
+                f"HTTP {response.status_code}"
             )
             return result
 
@@ -347,15 +321,13 @@ def discover_official_financial_pages(base_url):
 
         soup = BeautifulSoup(response.text, "html.parser")
 
-        investor_links = []
-        report_links = []
+        base_domain = urlparse(base_url).netloc
 
         investor_terms = [
             "investor",
             "investor relations",
-            "financial information",
             "financial results",
-            "financial statements",
+            "financial information",
             "المستثمرين",
             "علاقات المستثمرين",
             "القوائم المالية",
@@ -363,8 +335,8 @@ def discover_official_financial_pages(base_url):
 
         report_terms = [
             "annual report",
-            "financial statement",
             "financial report",
+            "financial statement",
             "quarterly report",
             "annual financial",
             "التقرير السنوي",
@@ -372,48 +344,49 @@ def discover_official_financial_pages(base_url):
             "النتائج المالية",
         ]
 
+        investor_links = []
+        report_links = []
+
         for anchor in soup.find_all("a", href=True):
-            text = clean_text(anchor.get_text(" ", strip=True))
-            href = urljoin(base_url, anchor["href"])
-            combined = f"{text} {href}".lower()
+            label = clean_text(anchor.get_text(" ", strip=True))
+            url = urljoin(base_url, anchor["href"])
 
-            if not href.startswith(("http://", "https://")):
+            if not url.startswith(("http://", "https://")):
                 continue
 
-            if urlparse(href).netloc != urlparse(base_url).netloc:
+            if urlparse(url).netloc != base_domain:
                 continue
+
+            combined = f"{label} {url}".lower()
 
             if any(term in combined for term in investor_terms):
                 investor_links.append({
-                    "text": text or "صفحة مرتبطة بالمستثمرين",
-                    "url": href,
+                    "text": label or "صفحة المستثمرين المحتملة",
+                    "url": url,
                 })
 
             if (
                 any(term in combined for term in report_terms)
-                or href.lower().endswith(".pdf")
+                or url.lower().split("?")[0].endswith(".pdf")
             ):
                 report_links.append({
-                    "text": text or "تقرير محتمل",
-                    "url": href,
+                    "text": label or "تقرير محتمل",
+                    "url": url,
                 })
 
-        # Deduplicate while preserving order.
-        def dedupe(items):
+        def deduplicate(items):
             seen = set()
-            output = []
+            result_items = []
 
             for item in items:
-                url = item["url"]
+                if item["url"] not in seen:
+                    seen.add(item["url"])
+                    result_items.append(item)
 
-                if url not in seen:
-                    seen.add(url)
-                    output.append(item)
+            return result_items
 
-            return output
-
-        result["investor_links"] = dedupe(investor_links)[:15]
-        result["report_links"] = dedupe(report_links)[:25]
+        result["investor_links"] = deduplicate(investor_links)[:15]
+        result["report_links"] = deduplicate(report_links)[:25]
 
     except Exception as exc:
         result["website_status"] = (
@@ -424,20 +397,19 @@ def discover_official_financial_pages(base_url):
 
 
 # ============================================================
-# AUTOMATIC MARKET AND FUNDAMENTAL DATA RETRIEVAL
+# AUTOMATIC DATA RETRIEVAL
 # ============================================================
 
 def retrieve_bank_data(bank):
     """
-    Attempt automatic retrieval of:
-    - Quote / market information
-    - Financial statements
-    - Balance sheet
-    - Cash flow
-    - Official website report links
-
-    Missing data is preserved as NaN.
+    IMPORTANT FIX:
+    bank must be a dictionary. The cache function below converts
+    tuple-based bank definitions back into dictionaries before
+    submitting this function to the thread pool.
     """
+    if not isinstance(bank, dict):
+        bank = dict(bank)
+
     symbol = bank["symbol"]
 
     output = {
@@ -484,8 +456,9 @@ def retrieve_bank_data(bank):
         info = safe_get_info(ticker)
 
         # ----------------------------------------------------
-        # Market data
+        # Market information
         # ----------------------------------------------------
+
         price = first_valid(
             info.get("regularMarketPrice"),
             info.get("currentPrice"),
@@ -497,76 +470,71 @@ def retrieve_bank_data(bank):
             info.get("previousClose"),
         )
 
-        # If info has no current price, try recent daily history.
         if pd.isna(price):
             try:
-                hist = ticker.history(
+                history = ticker.history(
                     period="5d",
                     interval="1d",
                     auto_adjust=False,
                 )
 
-                if hist is not None and not hist.empty:
-                    close_values = hist["Close"].dropna()
+                if history is not None and not history.empty:
+                    close_values = history["Close"].dropna()
 
                     if not close_values.empty:
                         price = safe_float(close_values.iloc[-1])
 
                         output["source_notes"].append(
-                            "السعر مأخوذ من آخر إغلاق متاح؛ "
-                            "قد لا يكون سعرًا لحظيًا."
+                            "السعر مأخوذ من آخر إغلاق متاح، "
+                            "وقد لا يكون سعرًا لحظيًا."
                         )
+
             except Exception as exc:
-                LOGGER.info(
+                LOGGER.warning(
                     "History failed for %s: %s",
                     symbol,
                     exc,
                 )
 
-        output["price"] = price
-        output["previous_close"] = previous_close
-        output["market_cap"] = safe_float(info.get("marketCap"))
-        output["shares_outstanding"] = safe_float(
-            info.get("sharesOutstanding")
-        )
-        output["currency"] = info.get("currency")
-        output["trailing_pe"] = safe_float(
-            info.get("trailingPE")
-        )
-        output["forward_pe"] = safe_float(
-            info.get("forwardPE")
-        )
-        output["price_to_book"] = safe_float(
-            info.get("priceToBook")
-        )
-        output["eps"] = safe_float(info.get("trailingEps"))
-        output["book_value_per_share"] = safe_float(
-            info.get("bookValue")
-        )
-        output["dividend_yield"] = safe_float(
-            info.get("dividendYield")
-        )
-        output["payout_ratio"] = safe_float(
-            info.get("payoutRatio")
-        )
-        output["roe"] = safe_float(info.get("returnOnEquity"))
-        output["roa"] = safe_float(info.get("returnOnAssets"))
+        output.update({
+            "price": price,
+            "previous_close": previous_close,
+            "market_cap": safe_float(info.get("marketCap")),
+            "shares_outstanding": safe_float(
+                info.get("sharesOutstanding")
+            ),
+            "currency": info.get("currency"),
+            "trailing_pe": safe_float(info.get("trailingPE")),
+            "forward_pe": safe_float(info.get("forwardPE")),
+            "price_to_book": safe_float(info.get("priceToBook")),
+            "eps": safe_float(info.get("trailingEps")),
+            "book_value_per_share": safe_float(
+                info.get("bookValue")
+            ),
+            "dividend_yield": safe_float(
+                info.get("dividendYield")
+            ),
+            "payout_ratio": safe_float(
+                info.get("payoutRatio")
+            ),
+            "roe": safe_float(info.get("returnOnEquity")),
+            "roa": safe_float(info.get("returnOnAssets")),
+        })
 
-        if not pd.isna(price):
-            output["market_status"] = "تم جلب سعر"
-        else:
-            output["market_status"] = (
-                "لم يتوفر سعر من المصدر"
-            )
+        output["market_status"] = (
+            "تم جلب سعر"
+            if not pd.isna(price)
+            else "لم يتوفر سعر من المصدر"
+        )
 
         # ----------------------------------------------------
         # Financial statements
         # ----------------------------------------------------
+
         financials = safe_get_statement(ticker, "financials")
         balance = safe_get_statement(ticker, "balance_sheet")
         cashflow = safe_get_statement(ticker, "cashflow")
 
-        # Some yfinance versions expose quarterly statements.
         if financials.empty:
             financials = safe_get_statement(
                 ticker,
@@ -587,10 +555,7 @@ def retrieve_bank_data(bank):
 
         output["total_revenue"] = get_last_numeric_value(
             financials,
-            [
-                "total revenue",
-                "operating revenue",
-            ],
+            ["total revenue", "operating revenue"],
         )
 
         output["net_income"] = get_last_numeric_value(
@@ -603,30 +568,22 @@ def retrieve_bank_data(bank):
 
         output["interest_income"] = get_last_numeric_value(
             financials,
-            [
-                "interest income",
-            ],
+            ["interest income"],
         )
 
         output["interest_expense"] = get_last_numeric_value(
             financials,
-            [
-                "interest expense",
-            ],
+            ["interest expense"],
         )
 
         output["net_interest_income"] = get_last_numeric_value(
             financials,
-            [
-                "net interest income",
-            ],
+            ["net interest income"],
         )
 
         output["total_assets"] = get_last_numeric_value(
             balance,
-            [
-                "total assets",
-            ],
+            ["total assets"],
         )
 
         output["total_equity"] = get_last_numeric_value(
@@ -639,15 +596,13 @@ def retrieve_bank_data(bank):
             ],
         )
 
-        # Search for loans and deposits only if provider labels
-        # are available. Definitions can differ across providers.
         output["gross_loans"] = get_last_numeric_value(
             balance,
             [
                 "loans and advances",
                 "loans receivable",
-                "loans",
                 "total loans",
+                "loans",
             ],
         )
 
@@ -678,68 +633,70 @@ def retrieve_bank_data(bank):
                 "لم تتوفر قوائم مالية منظمة من Yahoo Finance."
             )
 
-        # If the provider has no statement-derived equity,
-        # do not replace it silently with an estimate.
-        if pd.isna(output["total_equity"]):
-            output["source_notes"].append(
-                "حقوق الملكية غير متاحة من القوائم المسترجعة."
-            )
-
         # ----------------------------------------------------
         # Official website discovery
         # ----------------------------------------------------
+
         website_data = discover_official_financial_pages(
             bank.get("website")
         )
 
-        output["website_status"] = website_data[
-            "website_status"
-        ]
-        output["investor_links"] = website_data[
-            "investor_links"
-        ]
-        output["report_links"] = website_data[
-            "report_links"
-        ]
+        output["website_status"] = website_data["website_status"]
+        output["investor_links"] = website_data["investor_links"]
+        output["report_links"] = website_data["report_links"]
 
         output["source_notes"].append(
-            "فحص الموقع الرسمي يبحث عن روابط تقارير؛ "
-            "ولا يعني أن الأرقام استخرجت من هذه التقارير."
+            "فحص الموقع الرسمي يكتشف روابط محتملة فقط؛ "
+            "لا يعني أن الأرقام استخرجت من ملفات PDF."
         )
 
         output["data_status"] = "اكتمل الجلب الأولي"
 
     except Exception as exc:
+        LOGGER.exception("Data retrieval failed for %s", symbol)
+
         output["data_status"] = (
             f"تعذر الجلب: {type(exc).__name__}"
         )
+
         output["source_notes"].append(
-            f"تفاصيل الخطأ: {clean_text(exc)[:180]}"
+            f"خطأ الجلب: {clean_text(exc)[:180]}"
         )
 
     # --------------------------------------------------------
-    # Derived metrics
+    # Derived financial metrics
     # --------------------------------------------------------
-    output["calculated_bvps"] = np.nan
-    output["calculated_roe"] = np.nan
-    output["calculated_roa"] = np.nan
 
     shares = safe_float(output["shares_outstanding"])
     equity = safe_float(output["total_equity"])
     net_income = safe_float(output["net_income"])
     assets = safe_float(output["total_assets"])
 
-    if not pd.isna(equity) and not pd.isna(shares) and shares > 0:
+    output["calculated_bvps"] = np.nan
+    output["calculated_roe"] = np.nan
+    output["calculated_roa"] = np.nan
+
+    if (
+        not pd.isna(equity)
+        and not pd.isna(shares)
+        and shares > 0
+    ):
         output["calculated_bvps"] = equity / shares
 
-    if not pd.isna(net_income) and not pd.isna(equity) and equity > 0:
+    if (
+        not pd.isna(net_income)
+        and not pd.isna(equity)
+        and equity > 0
+    ):
         output["calculated_roe"] = net_income / equity
 
-    if not pd.isna(net_income) and not pd.isna(assets) and assets > 0:
+    if (
+        not pd.isna(net_income)
+        and not pd.isna(assets)
+        and assets > 0
+    ):
         output["calculated_roa"] = net_income / assets
 
-    # Use provider values when available; calculated values are
-    # fallback values and should be interpreted cautiously.
     output["roe_final"] = first_valid(
         output["roe"],
         output["calculated_roe"],
@@ -759,66 +716,38 @@ def retrieve_bank_data(bank):
 
 
 # ============================================================
-# BANK-SPECIFIC VALUATION ENGINE
+# BANK VALUATION ENGINE
 # ============================================================
 
-def valuation_engine(row, cost_of_equity=COST_OF_EQUITY):
-    """
-    Bank valuation approach:
-    1. P/B valuation anchored to book value per share.
-    2. Residual-income-style estimate when BVPS and ROE are usable.
-    3. P/E-based cross-check when EPS is positive.
-    4. Conservative blend where enough inputs exist.
-
-    This is an analytical estimate, not a guaranteed fair value.
-    Banks require consistent units, reporting periods, and
-    preferably audited financial statements.
-    """
+def valuation_engine(row, cost_of_equity):
     price = safe_float(row.get("price"))
     bvps = safe_float(row.get("bvps_final"))
     eps = safe_float(row.get("eps"))
     roe = safe_float(row.get("roe_final"))
-    pb = safe_float(row.get("price_to_book"))
-    pe = safe_float(row.get("trailing_pe"))
 
-    methods = []
     fair_values = []
-    method_weights = []
+    weights = []
+    methods = []
 
-    # --------------------------------------------------------
-    # Method 1: P/B framework
-    # --------------------------------------------------------
-    # A bank's justified P/B depends on sustainable ROE and
-    # required return. The formula is only used when the inputs
-    # are sensible and comparable.
+    # Method 1: Justified P/B approximation
     if (
         not pd.isna(bvps)
         and bvps > 0
         and not pd.isna(roe)
-        and 0 < cost_of_equity < 1
+        and cost_of_equity > 0
     ):
-        sustainable_roe = min(max(roe, -0.20), 0.60)
-
-        if sustainable_roe > 0:
-            justified_pb = (
-                sustainable_roe / cost_of_equity
-            )
-
-            # Guard against extreme values caused by noisy data.
+        if roe > 0:
+            justified_pb = roe / cost_of_equity
             justified_pb = min(max(justified_pb, 0.35), 2.50)
 
             fair_pb = bvps * justified_pb
 
             if np.isfinite(fair_pb) and fair_pb > 0:
                 fair_values.append(fair_pb)
-                method_weights.append(0.50)
-                methods.append("P/B مبرر حسب العائد على حقوق الملكية")
+                weights.append(0.50)
+                methods.append("P/B مبرر")
 
-    # --------------------------------------------------------
-    # Method 2: Simplified residual-income framework
-    # --------------------------------------------------------
-    # This is a one-stage approximation, not a full DCF.
-    # It assumes sustainable ROE and stable long-run growth.
+    # Method 2: Simplified residual-income estimate
     growth = DEFAULT_GROWTH_BASE
 
     if (
@@ -841,74 +770,65 @@ def valuation_engine(row, cost_of_equity=COST_OF_EQUITY):
             and residual_value < bvps * 5
         ):
             fair_values.append(residual_value)
-            method_weights.append(0.35)
-            methods.append("نموذج دخل متبقٍ مبسط")
+            weights.append(0.35)
+            methods.append("دخل متبقٍ مبسط")
 
-    # --------------------------------------------------------
-    # Method 3: P/E cross-check
-    # --------------------------------------------------------
+    # Method 3: P/E cross-check.
+    # 7x is a screening assumption, not a verified peer multiple.
     if not pd.isna(eps) and eps > 0:
-        # The multiple is a broad screening assumption.
-        # It is not a market-derived peer multiple.
-        reference_pe = 7.0
-
-        fair_pe = eps * reference_pe
+        fair_pe = eps * 7.0
 
         if np.isfinite(fair_pe) and fair_pe > 0:
             fair_values.append(fair_pe)
-            method_weights.append(0.15)
-            methods.append("مضاعف ربحية افتراضي للفحص")
+            weights.append(0.15)
+            methods.append("مضاعف ربحية افتراضي")
 
-    # --------------------------------------------------------
-    # Combine methods
-    # --------------------------------------------------------
     fair_value = np.nan
     fair_low = np.nan
     fair_high = np.nan
+    confidence = "غير كافية"
 
     if fair_values:
-        weights = np.array(method_weights, dtype=float)
         values = np.array(fair_values, dtype=float)
+        weight_array = np.array(weights, dtype=float)
+        weight_array = weight_array / weight_array.sum()
 
-        weights = weights / weights.sum()
-        fair_value = float(np.sum(values * weights))
-
-        # Range is dispersion between available model outputs.
+        fair_value = float(np.sum(values * weight_array))
         fair_low = float(np.min(values))
         fair_high = float(np.max(values))
 
-    # Do not present the valuation as reliable if the inputs
-    # are insufficient or the model dispersion is extreme.
-    valuation_confidence = "منخفضة"
-
-    if len(fair_values) >= 2:
-        if fair_value > 0:
+        if len(fair_values) >= 2 and fair_value > 0:
             dispersion = (
                 (fair_high - fair_low) / fair_value
             )
 
             if dispersion <= 0.30:
-                valuation_confidence = "متوسطة"
+                confidence = "متوسطة"
             elif dispersion <= 0.60:
-                valuation_confidence = "منخفضة"
+                confidence = "منخفضة"
             else:
-                valuation_confidence = "ضعيفة جدًا"
+                confidence = "ضعيفة جدًا"
 
-    elif len(fair_values) == 1:
-        valuation_confidence = "منخفضة جدًا"
+        elif len(fair_values) == 1:
+            confidence = "منخفضة جدًا"
 
-    # Margin-of-safety buy zones.
-    buy_30 = fair_value * (1 - MARGIN_EXCELLENT) if not pd.isna(
-        fair_value
-    ) else np.nan
+    buy_30 = (
+        fair_value * (1 - MARGIN_EXCELLENT)
+        if not pd.isna(fair_value)
+        else np.nan
+    )
 
-    buy_20 = fair_value * (1 - MARGIN_STRONG) if not pd.isna(
-        fair_value
-    ) else np.nan
+    buy_20 = (
+        fair_value * (1 - MARGIN_STRONG)
+        if not pd.isna(fair_value)
+        else np.nan
+    )
 
-    buy_10 = fair_value * (1 - MARGIN_ACCEPTABLE) if not pd.isna(
-        fair_value
-    ) else np.nan
+    buy_10 = (
+        fair_value * (1 - MARGIN_ACCEPTABLE)
+        if not pd.isna(fair_value)
+        else np.nan
+    )
 
     upside = np.nan
 
@@ -928,26 +848,17 @@ def valuation_engine(row, cost_of_equity=COST_OF_EQUITY):
         "buy_zone_10": buy_10,
         "upside_to_fair_value": upside,
         "valuation_methods": "، ".join(methods) if methods else "غير كافٍ",
-        "valuation_confidence": valuation_confidence,
+        "valuation_confidence": confidence,
     }
 
 
 # ============================================================
-# SCENARIO ENGINE
+# THREE-YEAR SCENARIOS
 # ============================================================
 
 def scenario_engine(row):
-    """
-    Three-year scenario estimates based on current available EPS
-    or book value per share. Growth assumptions are user-adjustable
-    in the UI and are not predictions.
-    """
     eps = safe_float(row.get("eps"))
     bvps = safe_float(row.get("bvps_final"))
-
-    g_low = DEFAULT_GROWTH_LOW
-    g_base = DEFAULT_GROWTH_BASE
-    g_high = DEFAULT_GROWTH_HIGH
 
     result = {
         "target_3y_conservative": np.nan,
@@ -956,50 +867,55 @@ def scenario_engine(row):
         "scenario_basis": "غير متاح",
     }
 
-    # The scenario targets are indicative multiples of a growing
-    # earnings/book-value proxy. They are not price predictions.
     if not pd.isna(eps) and eps > 0:
-        base = eps * ((1 + g_base) ** 3) * 7.0
-        low = eps * ((1 + g_low) ** 3) * 6.0
-        high = eps * ((1 + g_high) ** 3) * 9.0
-
         result.update({
-            "target_3y_conservative": low,
-            "target_3y_base": base,
-            "target_3y_optimistic": high,
-            "scenario_basis": "ربحية السهم ومضاعفات افتراضية",
+            "target_3y_conservative": (
+                eps * (1 + DEFAULT_GROWTH_LOW) ** 3 * 6.0
+            ),
+            "target_3y_base": (
+                eps * (1 + DEFAULT_GROWTH_BASE) ** 3 * 7.0
+            ),
+            "target_3y_optimistic": (
+                eps * (1 + DEFAULT_GROWTH_HIGH) ** 3 * 9.0
+            ),
+            "scenario_basis": (
+                "ربحية السهم ومضاعفات افتراضية"
+            ),
         })
 
     elif not pd.isna(bvps) and bvps > 0:
-        # This is a book-value growth proxy, not an equity valuation.
         result.update({
-            "target_3y_conservative": bvps * (1 + g_low) ** 3,
-            "target_3y_base": bvps * (1 + g_base) ** 3,
-            "target_3y_optimistic": bvps * (1 + g_high) ** 3,
-            "scenario_basis": "نمو افتراضي للقيمة الدفترية فقط",
+            "target_3y_conservative": (
+                bvps * (1 + DEFAULT_GROWTH_LOW) ** 3
+            ),
+            "target_3y_base": (
+                bvps * (1 + DEFAULT_GROWTH_BASE) ** 3
+            ),
+            "target_3y_optimistic": (
+                bvps * (1 + DEFAULT_GROWTH_HIGH) ** 3
+            ),
+            "scenario_basis": (
+                "نمو افتراضي للقيمة الدفترية، وليس سعرًا مستهدفًا"
+            ),
         })
 
     return result
 
 
 # ============================================================
-# DATA QUALITY AND SCORING
+# DATA QUALITY
 # ============================================================
 
 def calculate_data_quality(row):
-    """
-    Completeness score based on availability of important inputs.
-    It does not measure whether the source is audited or accurate.
-    """
     checks = {
         "price": not pd.isna(safe_float(row.get("price"))),
         "EPS": not pd.isna(safe_float(row.get("eps"))),
         "BVPS": not pd.isna(safe_float(row.get("bvps_final"))),
         "ROE": not pd.isna(safe_float(row.get("roe_final"))),
         "ROA": not pd.isna(safe_float(row.get("roa_final"))),
-        "Net income": not pd.isna(safe_float(row.get("net_income"))),
-        "Total equity": not pd.isna(safe_float(row.get("total_equity"))),
-        "Total assets": not pd.isna(safe_float(row.get("total_assets"))),
+        "net income": not pd.isna(safe_float(row.get("net_income"))),
+        "equity": not pd.isna(safe_float(row.get("total_equity"))),
+        "assets": not pd.isna(safe_float(row.get("total_assets"))),
         "P/B": not pd.isna(safe_float(row.get("price_to_book"))),
         "P/E": not pd.isna(safe_float(row.get("trailing_pe"))),
     }
@@ -1009,76 +925,68 @@ def calculate_data_quality(row):
     return round(score, 1), checks
 
 
+# ============================================================
+# FINANCIAL SCORING
+# ============================================================
+
 def financial_score(row):
-    """
-    Transparent preliminary bank score.
-    Missing metrics do not receive a zero score; the score is
-    normalized over the available metrics and confidence is shown
-    separately.
-    """
     components = []
 
     roe = safe_float(row.get("roe_final"))
     roa = safe_float(row.get("roa_final"))
     eps = safe_float(row.get("eps"))
-    bvps = safe_float(row.get("bvps_final"))
-    net_income = safe_float(row.get("net_income"))
     equity = safe_float(row.get("total_equity"))
     assets = safe_float(row.get("total_assets"))
+    net_income = safe_float(row.get("net_income"))
     price = safe_float(row.get("price"))
     fair_value = safe_float(row.get("fair_value"))
 
-    # ROE: 25 points
+    # ROE: maximum 25
     if not pd.isna(roe):
         if roe >= 0.25:
-            s = 25
+            score = 25
         elif roe >= 0.18:
-            s = 21
+            score = 21
         elif roe >= 0.12:
-            s = 17
+            score = 17
         elif roe >= 0.08:
-            s = 12
+            score = 12
         elif roe >= 0:
-            s = 6
+            score = 6
         else:
-            s = 0
+            score = 0
 
-        components.append((s, 25))
+        components.append((score, 25))
 
-    # ROA: 15 points
+    # ROA: maximum 15
     if not pd.isna(roa):
         if roa >= 0.025:
-            s = 15
+            score = 15
         elif roa >= 0.018:
-            s = 12
+            score = 12
         elif roa >= 0.012:
-            s = 9
+            score = 9
         elif roa >= 0.005:
-            s = 5
+            score = 5
         elif roa >= 0:
-            s = 2
+            score = 2
         else:
-            s = 0
+            score = 0
 
-        components.append((s, 15))
+        components.append((score, 15))
 
-    # Earnings: 15 points
     if not pd.isna(eps):
         components.append((15 if eps > 0 else 0, 15))
 
-    # Equity: 15 points
     if not pd.isna(equity):
         components.append((15 if equity > 0 else 0, 15))
 
-    # Assets: 10 points
     if not pd.isna(assets):
         components.append((10 if assets > 0 else 0, 10))
 
-    # Profitability: 10 points
     if not pd.isna(net_income):
         components.append((10 if net_income > 0 else 0, 10))
 
-    # Valuation relative to the model estimate: 10 points
     if (
         not pd.isna(price)
         and price > 0
@@ -1088,29 +996,31 @@ def financial_score(row):
         upside = fair_value / price - 1
 
         if upside >= 0.30:
-            s = 10
+            score = 10
         elif upside >= 0.15:
-            s = 8
+            score = 8
         elif upside >= 0:
-            s = 6
+            score = 6
         elif upside >= -0.15:
-            s = 3
+            score = 3
         else:
-            s = 0
+            score = 0
 
-        components.append((s, 10))
+        components.append((score, 10))
 
     if not components:
         return np.nan
 
-    available_max = sum(weight for _, weight in components)
+    maximum = sum(weight for _, weight in components)
     earned = sum(value for value, _ in components)
 
-    return round(100 * earned / available_max, 1)
+    return round(100 * earned / maximum, 1)
 
 
 def score_label(score):
-    if pd.isna(safe_float(score)):
+    score = safe_float(score)
+
+    if pd.isna(score):
         return "بيانات غير كافية"
 
     if score >= 80:
@@ -1127,26 +1037,27 @@ def score_label(score):
 def analyze_bank_record(record, cost_of_equity):
     row = dict(record)
 
-    valuation = valuation_engine(
-        row,
-        cost_of_equity=cost_of_equity,
+    row.update(
+        valuation_engine(row, cost_of_equity)
     )
-    row.update(valuation)
 
-    scenarios = scenario_engine(row)
-    row.update(scenarios)
+    row.update(
+        scenario_engine(row)
+    )
 
-    quality, quality_checks = calculate_data_quality(row)
+    quality, checks = calculate_data_quality(row)
 
     row["data_quality"] = quality
-    row["quality_checks"] = quality_checks
+    row["quality_checks"] = checks
 
     row["financial_score"] = financial_score(row)
-    row["financial_grade"] = score_label(row["financial_score"])
+    row["financial_grade"] = score_label(
+        row["financial_score"]
+    )
 
     row["analysis_status"] = (
         "تحليل أولي"
-        if quality >= MIN_DATA_CONFIDENCE
+        if quality >= 35
         else "بيانات غير كافية"
     )
 
@@ -1154,60 +1065,123 @@ def analyze_bank_record(record, cost_of_equity):
 
 
 # ============================================================
-# LOAD / CACHE
+# DATA LOADER - TUPLE ERROR FIXED
 # ============================================================
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def load_all_banks_cached(bank_definitions, cost_of_equity):
+    """
+    Accept either dictionaries or tuples of (key, value) pairs.
+
+    FIX:
+    Convert each bank definition back to a dictionary before
+    calling retrieve_bank_data. This fixes:
+    TypeError: tuple indices must be integers or slices, not str
+    """
+
+    banks = []
+
+    for item in bank_definitions:
+        if isinstance(item, dict):
+            bank = dict(item)
+        else:
+            bank = dict(item)
+
+        banks.append(bank)
+
     records = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {
             executor.submit(retrieve_bank_data, bank): bank
-            for bank in bank_definitions
+            for bank in banks
         }
 
         for future in as_completed(future_map):
             bank = future_map[future]
 
             try:
-                records.append(future.result())
+                result = future.result()
+
+                if isinstance(result, dict):
+                    records.append(result)
+                else:
+                    records.append({
+                        **bank,
+                        "retrieved_at": now_utc(),
+                        "data_status": "صيغة نتيجة غير متوقعة",
+                        "price": np.nan,
+                        "source_notes": [
+                            "دالة الجلب لم تُرجع قاموسًا."
+                        ],
+                    })
+
             except Exception as exc:
                 LOGGER.exception(
-                    "Unexpected retrieval error for %s",
-                    bank["symbol"],
+                    "Retrieval failed for %s",
+                    bank.get("symbol", "UNKNOWN"),
                 )
 
                 records.append({
                     **bank,
                     "retrieved_at": now_utc(),
-                    "data_status": f"خطأ: {type(exc).__name__}",
+                    "data_status": (
+                        f"تعذر الجلب: {type(exc).__name__}"
+                    ),
                     "price": np.nan,
-                    "source_notes": [clean_text(exc)],
+                    "source_notes": [
+                        f"خطأ: {clean_text(exc)[:180]}"
+                    ],
                 })
 
-    analyzed = [
-        analyze_bank_record(
-            record,
-            cost_of_equity=cost_of_equity,
-        )
-        for record in records
-    ]
+    analyzed = []
+
+    for record in records:
+        try:
+            analyzed.append(
+                analyze_bank_record(
+                    record,
+                    cost_of_equity,
+                )
+            )
+
+        except Exception as exc:
+            LOGGER.exception(
+                "Analysis failed for %s",
+                record.get("symbol", "UNKNOWN"),
+            )
+
+            failed_record = dict(record)
+            failed_record["analysis_status"] = (
+                f"تعذر التحليل: {type(exc).__name__}"
+            )
+
+            notes = failed_record.get("source_notes", [])
+
+            if not isinstance(notes, list):
+                notes = [str(notes)]
+
+            notes.append(
+                f"خطأ التحليل: {clean_text(exc)[:180]}"
+            )
+
+            failed_record["source_notes"] = notes
+            analyzed.append(failed_record)
 
     df = pd.DataFrame(analyzed)
 
-    if "financial_score" in df.columns:
+    if not df.empty and "financial_score" in df.columns:
         df = df.sort_values(
             by=["financial_score", "data_quality"],
             ascending=[False, False],
             na_position="last",
-        )
+        ).reset_index(drop=True)
 
     return df
 
 
 # ============================================================
-# STREAMLIT UI
+# STREAMLIT PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
@@ -1225,269 +1199,232 @@ st.markdown(
     }
 
     .main-title {
-        font-size: 30px;
+        font-size: 29px;
         font-weight: 800;
         text-align: center;
-        margin-bottom: 6px;
+        margin-bottom: 8px;
     }
 
     .subtitle {
-        font-size: 15px;
         text-align: center;
-        opacity: 0.80;
+        opacity: .80;
         margin-bottom: 22px;
     }
 
-    .info-box {
-        border: 1px solid rgba(128,128,128,.30);
-        border-radius: 12px;
-        padding: 14px;
-        margin: 8px 0 18px 0;
-    }
-
-    .small-note {
-        font-size: 12px;
-        opacity: .78;
-    }
-
     div[data-testid="stMetric"] {
-        border: 1px solid rgba(128,128,128,.22);
-        padding: 12px;
+        border: 1px solid rgba(128,128,128,.25);
         border-radius: 12px;
+        padding: 12px;
     }
-
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown(
-    '<div class="main-title">🏦 EGX Banks Financial Intelligence PRO</div>',
+    '<div class="main-title">'
+    '🏦 EGX Banks Financial Intelligence PRO'
+    '</div>',
     unsafe_allow_html=True,
 )
 
 st.markdown(
     '<div class="subtitle">'
-    'محرك التحليل المالي للبنوك المصرية — جلب تلقائي للبيانات '
-    'من المصادر المتاحة'
+    'محرك التحليل المالي للبنوك المصرية — جلب تلقائي للبيانات'
     '</div>',
     unsafe_allow_html=True,
 )
 
-with st.expander("⚙️ إعدادات التحليل", expanded=True):
-    c1, c2, c3 = st.columns(3)
 
-    with c1:
+# ============================================================
+# SIDEBAR / SETTINGS
+# ============================================================
+
+with st.expander("⚙️ إعدادات التحليل", expanded=True):
+    col1, col2 = st.columns(2)
+
+    with col1:
         cost_of_equity_pct = st.slider(
             "العائد المطلوب على حقوق الملكية %",
             min_value=12,
             max_value=35,
             value=24,
             step=1,
-            help=(
-                "افتراض تقييم قابل للتعديل؛ ليس سعر فائدة رسميًا "
-                "ولا تقديرًا مضمونًا لتكلفة رأس المال."
-            ),
+            help="افتراض قابل للتعديل لأغراض التقييم.",
         )
 
-    with c2:
-        min_quality = st.slider(
-            "حد جودة البيانات للعرض المميز",
-            min_value=0,
-            max_value=100,
-            value=35,
-            step=5,
-        )
-
-    with c3:
+    with col2:
         top_n = st.slider(
-            "عدد البنوك في الجدول الرئيسي",
+            "عدد البنوك المعروضة",
             min_value=5,
-            max_value=max(5, len(BANKS)),
+            max_value=len(BANKS),
             value=min(10, len(BANKS)),
             step=1,
         )
 
     st.caption(
-        "مصدر البيانات الأساسي: Yahoo Finance عند توفر البيانات. "
-        "يتم فحص المواقع الرسمية بحثًا عن روابط التقارير، "
-        "لكن وجود رابط لا يعني أن محتوى التقرير تم تحليله."
+        "المصدر الأساسي للبيانات المنظمة هو Yahoo Finance. "
+        "يتم فحص المواقع الرسمية للبحث عن روابط التقارير، "
+        "لكن استخراج كل بيانات PDF ليس مضمونًا في هذه النسخة."
     )
 
 cost_of_equity = cost_of_equity_pct / 100.0
 
-c_load, c_refresh = st.columns([3, 1])
 
-with c_load:
+# ============================================================
+# REFRESH / RUN
+# ============================================================
+
+col_info, col_refresh, col_run = st.columns([3, 1, 1])
+
+with col_info:
     st.info(
-        "لا تحتاج إلى رفع ملفات. اضغط الزر لجلب البيانات "
-        "المتاحة وتحليلها تلقائيًا."
+        "لا تحتاج إلى رفع أي ملفات. اضغط تشغيل التحليل "
+        "لجلب البيانات المتاحة تلقائيًا."
     )
 
-with c_refresh:
-    refresh = st.button(
+with col_refresh:
+    refresh_clicked = st.button(
         "🔄 تحديث البيانات",
         use_container_width=True,
-        type="primary",
     )
 
-if refresh:
-    load_all_banks_cached.clear()
+with col_run:
+    run_clicked = st.button(
+        "▶️ تشغيل التحليل",
+        type="primary",
+        use_container_width=True,
+    )
 
-if (
-    "bank_analysis_df" not in st.session_state
-    or refresh
-    or st.button("▶️ تشغيل التحليل", use_container_width=True)
-):
+if refresh_clicked:
+    load_all_banks_cached.clear()
+    st.session_state.pop("bank_analysis_df", None)
+
+if refresh_clicked or run_clicked or "bank_analysis_df" not in st.session_state:
     with st.spinner(
-        "جارٍ جلب بيانات البنوك وفحص المصادر وحساب التقييمات..."
+        "جارٍ جلب البيانات المالية وفحص المصادر..."
     ):
         try:
-            definitions = tuple(
+            # Cache arguments are immutable tuples, but the loader
+            # converts them back to dictionaries before data retrieval.
+            bank_definitions = tuple(
                 tuple(sorted(bank.items()))
                 for bank in BANKS
             )
 
-            # Convert the immutable representation back to dictionaries.
-            bank_definitions = [
-                dict(items)
-                for items in definitions
-            ]
-
             df = load_all_banks_cached(
-                tuple(
-                    tuple(sorted(bank.items()))
-                    for bank in bank_definitions
-                ),
+                bank_definitions,
                 cost_of_equity,
             )
 
-            # Depending on Streamlit cache serialization, normalize
-            # the input if needed by the helper below.
             st.session_state["bank_analysis_df"] = df
 
         except Exception as exc:
+            LOGGER.exception("Application-level analysis failed")
+
             st.error(
                 "تعذر إكمال التحليل. "
                 f"نوع الخطأ: {type(exc).__name__}"
             )
+
             st.exception(exc)
+
+
+# ============================================================
+# DISPLAY RESULTS
+# ============================================================
 
 df = st.session_state.get("bank_analysis_df")
 
 if isinstance(df, pd.DataFrame) and not df.empty:
 
     # --------------------------------------------------------
-    # Main KPIs
+    # KPI cards
     # --------------------------------------------------------
+
     total_banks = len(df)
 
-    price_count = (
+    prices_available = (
         df["price"].notna().sum()
         if "price" in df.columns
         else 0
     )
 
-    fair_count = (
+    valuations_available = (
         df["fair_value"].notna().sum()
         if "fair_value" in df.columns
         else 0
     )
 
-    good_data_count = (
-        (df["data_quality"] >= min_quality).sum()
-        if "data_quality" in df.columns
+    statements_available = (
+        df["statement_status"].eq("تم استرجاع قوائم").sum()
+        if "statement_status" in df.columns
         else 0
     )
 
-    m1, m2, m3, m4 = st.columns(4)
+    k1, k2, k3, k4 = st.columns(4)
 
-    m1.metric("البنوك في القائمة", f"{total_banks}")
-    m2.metric("أسعار متاحة", f"{price_count}")
-    m3.metric("تقييمات مبدئية", f"{fair_count}")
-    m4.metric("جودة بيانات مقبولة", f"{good_data_count}")
+    k1.metric("البنوك في القائمة", str(total_banks))
+    k2.metric("أسعار متاحة", str(prices_available))
+    k3.metric("تقييمات مبدئية", str(valuations_available))
+    k4.metric("قوائم مسترجعة", str(statements_available))
+
+    # --------------------------------------------------------
+    # Main ranking
+    # --------------------------------------------------------
 
     st.markdown("## 🏆 ترتيب البنوك حسب التحليل المالي")
 
     st.caption(
-        "الدرجة ترتيب أولي مبني على المؤشرات المتاحة فقط، "
-        "ولا تعني أن البنك استثمار آمن أو أن بياناته مكتملة."
+        "الترتيب أولي ويعتمد على البيانات المتاحة لكل بنك. "
+        "لا تعتبر الدرجة توصية شراء أو مقياسًا مكتملًا للمخاطر."
     )
 
-    display_df = df.copy()
+    main_mapping = {
+        "symbol": "السهم",
+        "name_ar": "البنك",
+        "price": "السعر",
+        "fair_value": "القيمة العادلة",
+        "buy_zone_30": "شراء بخصم 30%",
+        "buy_zone_20": "شراء بخصم 20%",
+        "buy_zone_10": "شراء بخصم 10%",
+        "roe_final": "العائد على حقوق الملكية",
+        "roa_final": "العائد على الأصول",
+        "eps": "ربحية السهم",
+        "bvps_final": "القيمة الدفترية للسهم",
+        "trailing_pe": "مضاعف الربحية",
+        "price_to_book": "مضاعف القيمة الدفترية",
+        "financial_score": "الدرجة المالية",
+        "data_quality": "جودة البيانات",
+        "valuation_confidence": "الثقة بالتقييم",
+        "statement_status": "حالة القوائم",
+        "data_status": "حالة الجلب",
+    }
 
-    display_df["السهم"] = display_df["symbol"]
-    display_df["البنك"] = display_df["name_ar"]
-    display_df["السعر"] = display_df["price"]
-    display_df["القيمة العادلة"] = display_df["fair_value"]
-    display_df["شراء بهامش 30%"] = display_df["buy_zone_30"]
-    display_df["شراء بهامش 20%"] = display_df["buy_zone_20"]
-    display_df["شراء بهامش 10%"] = display_df["buy_zone_10"]
-    display_df["العائد على حقوق الملكية"] = display_df["roe_final"]
-    display_df["العائد على الأصول"] = display_df["roa_final"]
-    display_df["ربحية السهم"] = display_df["eps"]
-    display_df["القيمة الدفترية للسهم"] = display_df["bvps_final"]
-    display_df["مضاعف الربحية"] = display_df["trailing_pe"]
-    display_df["مضاعف القيمة الدفترية"] = display_df["price_to_book"]
-    display_df["درجة مالية"] = display_df["financial_score"]
-    display_df["جودة البيانات"] = display_df["data_quality"]
-    display_df["الثقة بالتقييم"] = display_df["valuation_confidence"]
-    display_df["حالة البيانات"] = display_df["data_status"]
+    available_mapping = {
+        key: label
+        for key, label in main_mapping.items()
+        if key in df.columns
+    }
 
-    main_columns = [
-        "السهم",
-        "البنك",
-        "السعر",
-        "القيمة العادلة",
-        "شراء بهامش 30%",
-        "شراء بهامش 20%",
-        "شراء بهامش 10%",
-        "العائد على حقوق الملكية",
-        "العائد على الأصول",
-        "ربحية السهم",
-        "القيمة الدفترية للسهم",
-        "مضاعف الربحية",
-        "مضاعف القيمة الدفترية",
-        "درجة مالية",
-        "جودة البيانات",
-        "الثقة بالتقييم",
-        "حالة البيانات",
-    ]
-
-    main_columns = [
-        col for col in main_columns
-        if col in display_df.columns
-    ]
-
-    ranked_df = display_df.head(top_n)[main_columns]
+    main_df = (
+        df.head(top_n)[list(available_mapping.keys())]
+        .rename(columns=available_mapping)
+    )
 
     st.dataframe(
-        ranked_df,
+        main_df,
         use_container_width=True,
         hide_index=True,
         column_config={
-            "السعر": st.column_config.NumberColumn(
-                format="%.2f"
-            ),
-            "القيمة العادلة": st.column_config.NumberColumn(
-                format="%.2f"
-            ),
-            "شراء بهامش 30%": st.column_config.NumberColumn(
-                format="%.2f"
-            ),
-            "شراء بهامش 20%": st.column_config.NumberColumn(
-                format="%.2f"
-            ),
-            "شراء بهامش 10%": st.column_config.NumberColumn(
-                format="%.2f"
-            ),
-            "العائد على حقوق الملكية": st.column_config.NumberColumn(
-                format="%.1%%"
-            ),
-            "العائد على الأصول": st.column_config.NumberColumn(
-                format="%.1%%"
-            ),
-            "درجة مالية": st.column_config.ProgressColumn(
+            "السعر": st.column_config.NumberColumn(format="%.2f"),
+            "القيمة العادلة": st.column_config.NumberColumn(format="%.2f"),
+            "شراء بخصم 30%": st.column_config.NumberColumn(format="%.2f"),
+            "شراء بخصم 20%": st.column_config.NumberColumn(format="%.2f"),
+            "شراء بخصم 10%": st.column_config.NumberColumn(format="%.2f"),
+            "العائد على حقوق الملكية": st.column_config.NumberColumn(format="%.1%%"),
+            "العائد على الأصول": st.column_config.NumberColumn(format="%.1%%"),
+            "الدرجة المالية": st.column_config.ProgressColumn(
                 min_value=0,
                 max_value=100,
                 format="%.1f",
@@ -1501,109 +1438,102 @@ if isinstance(df, pd.DataFrame) and not df.empty:
     )
 
     # --------------------------------------------------------
-    # Valuation interpretation
+    # Valuation table
     # --------------------------------------------------------
-    st.markdown("## 💰 قراءة فرص التقييم")
 
-    valuation_view = df.copy()
+    st.markdown("## 💰 القيمة العادلة ونطاقات الشراء")
 
-    if "price" in valuation_view.columns:
-        valuation_view = valuation_view[
-            valuation_view["price"].notna()
+    valuation_df = df.copy()
+
+    if "price" in valuation_df.columns:
+        valuation_df = valuation_df[
+            valuation_df["price"].notna()
         ]
 
-    if "fair_value" in valuation_view.columns:
-        valuation_view = valuation_view[
-            valuation_view["fair_value"].notna()
+    if "fair_value" in valuation_df.columns:
+        valuation_df = valuation_df[
+            valuation_df["fair_value"].notna()
         ]
 
-    if not valuation_view.empty:
-        valuation_view["فرق القيمة العادلة %"] = (
-            valuation_view["fair_value"]
-            / valuation_view["price"]
+    if not valuation_df.empty:
+        valuation_df["فرق القيمة العادلة"] = (
+            valuation_df["fair_value"]
+            / valuation_df["price"]
             - 1
         )
 
-        valuation_view["منطقة التقييم"] = np.select(
+        valuation_df["منطقة السعر"] = np.select(
             [
-                valuation_view["price"]
-                <= valuation_view["buy_zone_30"],
-
-                valuation_view["price"]
-                <= valuation_view["buy_zone_20"],
-
-                valuation_view["price"]
-                <= valuation_view["buy_zone_10"],
-
-                valuation_view["price"]
-                < valuation_view["fair_value"],
+                valuation_df["price"] <= valuation_df["buy_zone_30"],
+                valuation_df["price"] <= valuation_df["buy_zone_20"],
+                valuation_df["price"] <= valuation_df["buy_zone_10"],
+                valuation_df["price"] < valuation_df["fair_value"],
             ],
             [
-                "خصم 30% أو أكثر عن القيمة المقدرة",
+                "خصم 30% أو أكثر",
                 "خصم 20%-30%",
                 "خصم 10%-20%",
-                "أقل من القيمة المقدرة بخصم محدود",
+                "أقل من القيمة العادلة بخصم محدود",
             ],
-            default="السعر عند القيمة المقدرة أو أعلى",
+            default="عند القيمة العادلة أو أعلى",
         )
 
+        valuation_mapping = {
+            "symbol": "السهم",
+            "name_ar": "البنك",
+            "price": "السعر",
+            "fair_value": "القيمة العادلة",
+            "fair_value_low": "أقل تقدير",
+            "fair_value_high": "أعلى تقدير",
+            "buy_zone_30": "شراء بخصم 30%",
+            "buy_zone_20": "شراء بخصم 20%",
+            "buy_zone_10": "شراء بخصم 10%",
+            "upside_to_fair_value": "الفرق عن القيمة العادلة",
+            "valuation_confidence": "الثقة بالتقييم",
+            "منطقة السعر": "منطقة السعر",
+        }
+
+        valuation_mapping = {
+            key: value
+            for key, value in valuation_mapping.items()
+            if key in valuation_df.columns
+        }
+
         st.dataframe(
-            valuation_view[
-                [
-                    "symbol",
-                    "name_ar",
-                    "price",
-                    "fair_value",
-                    "fair_value_low",
-                    "fair_value_high",
-                    "buy_zone_30",
-                    "buy_zone_20",
-                    "buy_zone_10",
-                    "upside_to_fair_value",
-                    "valuation_confidence",
-                    "منطقة التقييم",
-                ]
-            ].rename(
-                columns={
-                    "symbol": "السهم",
-                    "name_ar": "البنك",
-                    "price": "السعر",
-                    "fair_value": "القيمة العادلة",
-                    "fair_value_low": "أقل تقدير",
-                    "fair_value_high": "أعلى تقدير",
-                    "buy_zone_30": "شراء بخصم 30%",
-                    "buy_zone_20": "شراء بخصم 20%",
-                    "buy_zone_10": "شراء بخصم 10%",
-                    "upside_to_fair_value": "الفرق عن القيمة العادلة",
-                    "valuation_confidence": "الثقة بالتقييم",
-                }
+            valuation_df[list(valuation_mapping.keys())].rename(
+                columns=valuation_mapping
             ),
             use_container_width=True,
             hide_index=True,
         )
+
     else:
         st.warning(
-            "لا توجد تقييمات كافية لعرضها. "
-            "قد تكون البيانات المالية غير متاحة من المصدر."
+            "لا توجد تقييمات كافية. تحقق من توافر السعر "
+            "والقيمة الدفترية وربحية السهم."
         )
 
     # --------------------------------------------------------
     # Three-year scenarios
     # --------------------------------------------------------
-    st.markdown("## 📈 السيناريوهات الافتراضية لثلاث سنوات")
 
-    scenario_df = df[
-        [
-            "symbol",
-            "name_ar",
-            "target_3y_conservative",
-            "target_3y_base",
-            "target_3y_optimistic",
-            "scenario_basis",
-        ]
-    ].copy()
+    st.markdown("## 📈 سيناريوهات افتراضية لثلاث سنوات")
 
-    scenario_df = scenario_df.rename(
+    scenario_columns = [
+        "symbol",
+        "name_ar",
+        "target_3y_conservative",
+        "target_3y_base",
+        "target_3y_optimistic",
+        "scenario_basis",
+    ]
+
+    scenario_columns = [
+        col for col in scenario_columns
+        if col in df.columns
+    ]
+
+    scenario_df = df[scenario_columns].rename(
         columns={
             "symbol": "السهم",
             "name_ar": "البنك",
@@ -1621,25 +1551,27 @@ if isinstance(df, pd.DataFrame) and not df.empty:
     )
 
     st.warning(
-        "سيناريوهات السنوات الثلاث مبنية على معدلات نمو ومضاعفات "
-        "افتراضية، وليست توقعات مؤكدة أو أسعارًا مستهدفة موثقة."
+        "هذه السيناريوهات ناتجة عن افتراضات نمو ومضاعفات ثابتة؛ "
+        "ليست توقعات مؤكدة. إذا كان الأساس هو القيمة الدفترية "
+        "فهي لا تمثل سعرًا مستهدفًا."
     )
 
     # --------------------------------------------------------
-    # Individual bank profile
+    # Individual bank detail
     # --------------------------------------------------------
-    st.markdown("## 🔎 ملف البنك التفصيلي")
 
-    options = df["symbol"].astype(str).tolist()
+    st.markdown("## 🔎 التحليل التفصيلي للبنك")
+
+    symbol_options = df["symbol"].astype(str).tolist()
 
     selected_symbol = st.selectbox(
         "اختر البنك",
-        options,
-        format_func=lambda x: (
-            f"{x} — "
+        symbol_options,
+        format_func=lambda symbol: (
+            f"{symbol} — "
             + str(
                 df.loc[
-                    df["symbol"] == x,
+                    df["symbol"] == symbol,
                     "name_ar",
                 ].iloc[0]
             )
@@ -1649,65 +1581,67 @@ if isinstance(df, pd.DataFrame) and not df.empty:
     selected_rows = df[df["symbol"] == selected_symbol]
 
     if not selected_rows.empty:
-        row = selected_rows.iloc[0]
+        row = selected_rows.iloc[0].to_dict()
 
-        st.markdown(f"### {row.get('name_ar', selected_symbol)}")
-
-        a1, a2, a3, a4 = st.columns(4)
-
-        a1.metric("السعر", fmt_price(row.get("price")))
-        a2.metric(
-            "القيمة العادلة التقديرية",
-            fmt_price(row.get("fair_value")),
+        st.subheader(
+            f"{row.get('name_ar', selected_symbol)} "
+            f"({selected_symbol})"
         )
-        a3.metric(
+
+        d1, d2, d3, d4 = st.columns(4)
+
+        d1.metric("السعر", fmt_price(row.get("price")))
+        d2.metric("القيمة العادلة", fmt_price(row.get("fair_value")))
+        d3.metric(
             "القيمة الدفترية للسهم",
             fmt_price(row.get("bvps_final")),
         )
-        a4.metric(
-            "درجة التحليل",
+        d4.metric(
+            "الدرجة المالية",
             fmt_number(row.get("financial_score"), 1),
         )
 
-        st.markdown("#### المؤشرات المالية")
-
-        detail_metrics = [
+        detail_items = [
             ("العائد على حقوق الملكية", "roe_final", "percent"),
             ("العائد على الأصول", "roa_final", "percent"),
             ("ربحية السهم", "eps", "number"),
             ("مضاعف الربحية", "trailing_pe", "number"),
             ("مضاعف القيمة الدفترية", "price_to_book", "number"),
-            ("القيمة الدفترية للسهم", "bvps_final", "number"),
             ("صافي الدخل", "net_income", "number"),
             ("إجمالي الأصول", "total_assets", "number"),
             ("حقوق الملكية", "total_equity", "number"),
-            ("إجمالي الإيرادات", "total_revenue", "number"),
+            ("الإيرادات", "total_revenue", "number"),
             ("عائد التوزيعات", "dividend_yield", "percent"),
             ("نسبة التوزيعات", "payout_ratio", "percent"),
+            ("القيمة العادلة - الحد الأدنى", "fair_value_low", "number"),
+            ("القيمة العادلة - الحد الأعلى", "fair_value_high", "number"),
+            ("شراء بخصم 30%", "buy_zone_30", "number"),
+            ("شراء بخصم 20%", "buy_zone_20", "number"),
+            ("شراء بخصم 10%", "buy_zone_10", "number"),
         ]
 
-        metric_rows = []
+        detail_rows = []
 
-        for label, key, kind in detail_metrics:
+        for label, key, kind in detail_items:
             value = row.get(key)
 
             if kind == "percent":
-                shown = fmt_percent(value)
+                formatted = fmt_percent(value)
             else:
-                shown = fmt_number(value)
+                formatted = fmt_number(value)
 
-            metric_rows.append({
+            detail_rows.append({
                 "المؤشر": label,
-                "القيمة": shown,
+                "القيمة": formatted,
             })
 
         st.dataframe(
-            pd.DataFrame(metric_rows),
+            pd.DataFrame(detail_rows),
             use_container_width=True,
             hide_index=True,
         )
 
-        st.markdown("#### جودة البيانات والثقة")
+        st.markdown("### جودة البيانات والمصادر")
 
         st.write(
             f"جودة البيانات: "
@@ -1722,6 +1656,11 @@ if isinstance(df, pd.DataFrame) and not df.empty:
         st.write(
             f"حالة القوائم المالية: "
             f"{row.get('statement_status', 'غير متاح')}"
+        )
+
+        st.write(
+            f"حالة السعر: "
+            f"{row.get('market_status', 'غير متاح')}"
         )
 
         st.write(
@@ -1747,13 +1686,12 @@ if isinstance(df, pd.DataFrame) and not df.empty:
         notes = row.get("source_notes", [])
 
         if isinstance(notes, list) and notes:
-            st.markdown("#### ملاحظات على البيانات")
+            st.markdown("### ملاحظات")
 
             for note in notes:
                 st.write(f"- {note}")
 
-        # Official site and discovered reports
-        st.markdown("#### روابط الموقع الرسمي والتقارير المحتملة")
+        st.markdown("### الموقع الرسمي وروابط التقارير")
 
         website = row.get("website")
 
@@ -1774,7 +1712,7 @@ if isinstance(df, pd.DataFrame) and not df.empty:
                 )
 
         if isinstance(report_links, list) and report_links:
-            st.markdown("**تقارير أو ملفات محتملة:**")
+            st.markdown("**تقارير وملفات محتملة:**")
 
             for item in report_links:
                 st.markdown(
@@ -1784,28 +1722,32 @@ if isinstance(df, pd.DataFrame) and not df.empty:
         if not investor_links and not report_links:
             st.info(
                 "لم يتم العثور على روابط تقارير مناسبة أثناء الفحص. "
-                "هذا لا يعني أن البنك لا ينشر تقارير مالية."
+                "قد تكون التقارير موجودة في صفحات لم يتم اكتشافها."
             )
 
     # --------------------------------------------------------
-    # Data quality view
+    # Data-quality monitoring
     # --------------------------------------------------------
+
     st.markdown("## 🧪 مراقبة جودة البيانات")
 
-    quality_view = df[
-        [
-            "symbol",
-            "name_ar",
-            "market_status",
-            "statement_status",
-            "website_status",
-            "data_quality",
-            "analysis_status",
-            "retrieved_at",
-        ]
-    ].copy()
+    quality_columns = [
+        "symbol",
+        "name_ar",
+        "market_status",
+        "statement_status",
+        "website_status",
+        "data_quality",
+        "analysis_status",
+        "retrieved_at",
+    ]
 
-    quality_view = quality_view.rename(
+    quality_columns = [
+        col for col in quality_columns
+        if col in df.columns
+    ]
+
+    quality_df = df[quality_columns].rename(
         columns={
             "symbol": "السهم",
             "name_ar": "البنك",
@@ -1819,15 +1761,16 @@ if isinstance(df, pd.DataFrame) and not df.empty:
     )
 
     st.dataframe(
-        quality_view,
+        quality_df,
         use_container_width=True,
         hide_index=True,
     )
 
     # --------------------------------------------------------
-    # Download generated analysis
+    # CSV export
     # --------------------------------------------------------
-    st.markdown("## 📥 تصدير نتائج التحليل")
+
+    st.markdown("## 📥 تصدير النتائج")
 
     export_columns = [
         "symbol",
@@ -1859,26 +1802,26 @@ if isinstance(df, pd.DataFrame) and not df.empty:
     ]
 
     export_columns = [
-        c for c in export_columns
-        if c in df.columns
+        col for col in export_columns
+        if col in df.columns
     ]
 
     export_df = df[export_columns].copy()
 
-    export_csv = export_df.to_csv(
+    csv_data = export_df.to_csv(
         index=False,
         encoding="utf-8-sig",
     ).encode("utf-8-sig")
 
     st.download_button(
         "⬇️ تحميل نتائج التحليل CSV",
-        data=export_csv,
+        data=csv_data,
         file_name="EGX_Banks_Financial_Analysis.csv",
         mime="text/csv",
         use_container_width=True,
     )
 
-    with st.expander("عرض البيانات الخام التي تم جلبها"):
+    with st.expander("عرض جميع البيانات الخام"):
         st.dataframe(
             df,
             use_container_width=True,
@@ -1887,19 +1830,23 @@ if isinstance(df, pd.DataFrame) and not df.empty:
 
 else:
     st.info(
-        "اضغط «تشغيل التحليل» لبدء جلب البيانات تلقائيًا. "
-        "قد يستغرق الجلب بعض الوقت حسب استجابة المصادر."
+        "لم تظهر نتائج حتى الآن. اضغط تشغيل التحليل، "
+        "ثم تحقق من رسائل الخطأ إن تعذر الوصول للمصادر."
     )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
 
 st.divider()
 
 st.caption(
-    f"{APP_NAME} v{APP_VERSION} | آخر وقت عرض: {now_utc()}"
+    f"{APP_NAME} v{APP_VERSION} | {now_utc()}"
 )
 
 st.caption(
-    "تنبيه استثماري: النتائج لأغراض التحليل الأولي فقط، "
-    "وليست توصية شراء أو بيع. يجب التحقق من القوائم المالية "
-    "الأصلية، وفترة التقرير، والعملة، ووحدة القياس، وعدد الأسهم "
-    "قبل اتخاذ قرار استثماري."
-)
+    "التحليل لأغراض المعلومات الأولية فقط، وليس توصية استثمارية. "
+    "تحقق من القوائم المالية الأصلية وتواريخها وعملتها ووحداتها "
+    "قبل اتخاذ أي قرار."
+    )

@@ -410,10 +410,31 @@ def make_display_df(records):
             "جودة البيانات %": r.get("data_quality"),
             "التوصيف": r.get("recommendation"),
         })
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values(["score", "data_quality"], ascending=False, na_position="last").reset_index(drop=True)
-        df["الترتيب"] = np.arange(1, len(df) + 1)
+    # Keep a stable schema even when no bank result was returned.
+    display_columns = [
+        "الترتيب", "البنك", "الرمز", "السعر (إغلاق يومي)", "تاريخ الشمعة",
+        "حالة السعر", "القيمة العادلة التقديرية", "قيمة عادلة - منخفض",
+        "قيمة عادلة - مرتفع", "شراء بخصم 10%", "شراء بخصم 20%",
+        "شراء بخصم 30%", "العائد المحتمل", "ROE", "ROA",
+        "القيمة الدفترية للسهم", "P/B من المصدر", "عائد التوزيعات",
+        "النتيجة / 100", "جودة البيانات %", "التوصيف",
+    ]
+    df = pd.DataFrame(rows, columns=display_columns)
+    if df.empty:
+        return df
+
+    # BUG FIX: score/data_quality are raw-record keys, not DataFrame column names.
+    # The display table uses Arabic labels, so sort by those actual labels.
+    for col in ("النتيجة / 100", "جودة البيانات %"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.sort_values(
+        by=["النتيجة / 100", "جودة البيانات %"],
+        ascending=[False, False],
+        na_position="last",
+        kind="mergesort",
+    ).reset_index(drop=True)
+    df["الترتيب"] = np.arange(1, len(df) + 1)
     return df
 
 

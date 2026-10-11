@@ -783,7 +783,40 @@ def build_financial_indicators(summary_df, annual_df, quarterly_df):
             'مصدر القوائم السنوية': latest.get('مصدر البيانات المالية',''),
             'تنبيه القطاع': 'نسب الرفع المالي وهامش الربح لا تُقارن مباشرة بين القطاعات؛ أوزان البنوك مختلفة، والتصنيف آلي مبدئي.'
         })
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    # درجة القوة المالية المعدّلة: الدرجة الأساسية مع خصم محدود عند نقص البيانات.
+    # لا تُعامل البيانات الناقصة على أنها أداء سيئ؛ تظهر منفصلة في تغطية البيانات والثقة.
+    base_col = 'درجة القوة المالية المبدئية /100'
+    out['درجة القوة المالية /100'] = np.nan
+    valid = out[base_col].notna()
+    coverage_fraction = pd.to_numeric(out.loc[valid, 'تغطية البيانات الأساسية %'], errors='coerce').fillna(0).clip(0, 100) / 100.0
+    out.loc[valid, 'درجة القوة المالية /100'] = (
+        pd.to_numeric(out.loc[valid, base_col], errors='coerce') * (0.85 + 0.15 * coverage_fraction)
+    ).clip(0, 100).round(1)
+
+    def strength_label(score):
+        if not np.isfinite(score): return 'غير كافٍ للتقييم'
+        if score >= 90: return 'استثنائي مبدئيًا'
+        if score >= 80: return 'قوي ماليًا مبدئيًا'
+        if score >= 70: return 'جيد ماليًا مبدئيًا'
+        if score >= 60: return 'متوسط مبدئيًا'
+        if score >= 40: return 'ضعيف نسبيًا مبدئيًا'
+        return 'ضعيف مبدئيًا'
+
+    def confidence_label(coverage):
+        if not np.isfinite(coverage): return 'منخفضة'
+        if coverage >= 80: return 'مرتفعة نسبيًا'
+        if coverage >= 60: return 'متوسطة'
+        return 'منخفضة'
+
+    out['تصنيف القوة المالية'] = out['درجة القوة المالية /100'].apply(strength_label)
+    out['الثقة بسبب تغطية البيانات'] = pd.to_numeric(out['تغطية البيانات الأساسية %'], errors='coerce').apply(confidence_label)
+    out['الترتيب المالي العام'] = out['درجة القوة المالية /100'].rank(method='min', ascending=False).astype('Int64')
+    out['الترتيب داخل القطاع'] = out.groupby('القطاع المبدئي', dropna=False)['درجة القوة المالية /100'].rank(method='min', ascending=False).astype('Int64')
+    return out
 
 
 # ========================= المرحلة الخامسة: محرك القيمة العادلة =========================
@@ -1180,17 +1213,33 @@ if 'summary_results' in st.session_state:
 
 
     with tab6:
-        st.markdown('### مؤشرات التحليل المالي — المرحلة الرابعة')
-        st.info('المؤشرات تُحسب من أحدث فترتين سنويتين متاحتين. نمو الأرباح لا يُحسب كنسبة تقليدية إذا كانت الفترة السابقة صفرًا أو خسارة. جودة الأرباح = التدفق النقدي التشغيلي ÷ صافي الربح، وتُعرض فقط عندما يكون صافي الربح موجبًا. المؤشر والدرجة مبدئيان وليسا توصية شراء أو قيمة عادلة.')
+        st.markdown('### 🏆 ترتيب الأسهم حسب القوة المالية — من 100 نقطة')
+        st.info('الدرجة تقدير مبدئي مبني على القوائم التي أمكن جمعها، مع خصم محدود عند نقص التغطية. ترتيب القطاعات المختلفة معًا إرشادي فقط؛ الأفضل مقارنة الأسهم داخل القطاع نفسه. هذه الدرجة لا تقيس رخص السعر ولا تمثل توصية شراء.')
         if indicators_df.empty:
             st.warning('لا توجد بيانات كافية لحساب المؤشرات. ابدأ جلب البيانات المالية أولًا.')
         else:
-            ix1, ix2, ix3 = st.columns(3)
-            ix1.metric('أسهم لها مؤشرات', int(indicators_df['درجة القوة المالية المبدئية /100'].notna().sum()))
-            ix2.metric('أسهم ببيانات محدودة', int(indicators_df['حالة المؤشر'].str.contains('محدودة', na=False).sum()))
-            ix3.metric('قطاعات مصنفة', int(indicators_df.loc[indicators_df['القطاع المبدئي'] != 'غير محدد','القطاع المبدئي'].nunique()))
+            ix1, ix2, ix3, ix4 = st.columns(4)
+            ix1.metric('أسهم لها درجة مالية', int(indicators_df['درجة القوة المالية /100'].notna().sum()))
+            ix2.metric('درجة 80 فأكثر', int((indicators_df['درجة القوة المالية /100'] >= 80).sum()))
+            ix3.metric('بيانات منخفضة التغطية', int((indicators_df['الثقة بسبب تغطية البيانات'] == 'منخفضة').sum()))
+            ix4.metric('قطاعات مصنفة', int(indicators_df.loc[indicators_df['القطاع المبدئي'] != 'غير محدد','القطاع المبدئي'].nunique()))
+
+            st.markdown('#### أفضل الأسهم حسب الدرجة المالية المتاحة')
+            top_n = st.slider('عدد الأسهم في قائمة القوة المالية', 10, 50, 20, 5)
+            top_view = indicators_df.sort_values(['درجة القوة المالية /100', 'تغطية البيانات الأساسية %'], ascending=[False, False], na_position='last').head(top_n)
+            ranking_cols = ['الترتيب المالي العام','رمز السهم','القطاع المبدئي','درجة القوة المالية /100','تصنيف القوة المالية','تغطية البيانات الأساسية %','الثقة بسبب تغطية البيانات','الترتيب داخل القطاع','حالة المؤشر']
+            ranking_cols = [c for c in ranking_cols if c in top_view.columns]
+            st.dataframe(top_view[ranking_cols], use_container_width=True, hide_index=True,
+                column_config={
+                    'درجة القوة المالية /100': st.column_config.ProgressColumn('القوة المالية /100', min_value=0, max_value=100, format='%.1f'),
+                    'تغطية البيانات الأساسية %': st.column_config.ProgressColumn('تغطية البيانات %', min_value=0, max_value=100, format='%.1f'),
+                })
+            st.download_button('⬇️ تنزيل ترتيب القوة المالية CSV', indicators_df.sort_values('درجة القوة المالية /100', ascending=False, na_position='last').to_csv(index=False).encode('utf-8-sig'), 'egx_financial_strength_ranking.csv', 'text/csv')
+            st.divider()
+            st.markdown('#### تفاصيل المؤشرات المالية')
+            st.caption('المؤشرات تُحسب من أحدث فترتين سنويتين متاحتين. نمو الأرباح لا يُحسب كنسبة تقليدية إذا كانت الفترة السابقة صفرًا أو خسارة. جودة الأرباح = التدفق النقدي التشغيلي ÷ صافي الربح، وتُعرض فقط عندما يكون صافي الربح موجبًا. المؤشر والدرجة مبدئيان وليسا توصية شراء أو قيمة عادلة.')
             sector_filter = st.multiselect('تصفية حسب القطاع', sorted(indicators_df['القطاع المبدئي'].dropna().unique()), default=sorted(indicators_df['القطاع المبدئي'].dropna().unique()))
-            view = indicators_df[indicators_df['القطاع المبدئي'].isin(sector_filter)].sort_values('درجة القوة المالية المبدئية /100', ascending=False, na_position='last')
+            view = indicators_df[indicators_df['القطاع المبدئي'].isin(sector_filter)].sort_values('درجة القوة المالية /100', ascending=False, na_position='last')
             st.dataframe(view, use_container_width=True, hide_index=True,
                          column_config={
                              'نمو الإيرادات سنويًا %': st.column_config.NumberColumn(format='%.1f%%'),
@@ -1199,6 +1248,7 @@ if 'summary_results' in st.session_state:
                              'ROE العائد على حقوق الملكية %': st.column_config.NumberColumn(format='%.2f%%'),
                              'ROA العائد على الأصول %': st.column_config.NumberColumn(format='%.2f%%'),
                              'درجة القوة المالية المبدئية /100': st.column_config.NumberColumn(format='%.1f'),
+                             'درجة القوة المالية /100': st.column_config.ProgressColumn(min_value=0, max_value=100, format='%.1f'),
                              'تغطية البيانات الأساسية %': st.column_config.NumberColumn(format='%.1f%%'),
                          })
             st.download_button('⬇️ تنزيل مؤشرات التحليل المالي CSV', view.to_csv(index=False).encode('utf-8-sig'), 'egx_financial_indicators.csv', 'text/csv')

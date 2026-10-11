@@ -877,14 +877,28 @@ def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summar
             # Guard against implausibly extreme outputs relative to market price.
             if np.isfinite(ddm_candidate) and ddm_candidate > 0 and (not np.isfinite(price) or ddm_candidate <= price * 5):
                 ddm_value = ddm_candidate
-        # Dividend model gets a limited weight; it does not replace earnings/book methods.
+        # DDM is a corroborating method, not an automatic downward adjustment.
+        # Blend it at only 5% when it is reasonably consistent with the existing
+        # earnings/book consensus. If it diverges materially, show it separately
+        # and flag it instead of letting a fragile dividend assumption distort fair value.
+        ddm_blended = False
         if np.isfinite(ddm_value):
             if components:
                 base_weight_sum = sum(w for _, w, _ in components)
-                components = [(v, (w / base_weight_sum) * 0.85, label) for v, w, label in components] if base_weight_sum > 0 else components
-                components.append((ddm_value, 0.15, 'خصم التوزيعات DDM'))
+                base_fair = (sum(v * w for v, w, _ in components) / base_weight_sum
+                             if base_weight_sum > 0 else np.nan)
+                ratio = ddm_value / base_fair if np.isfinite(base_fair) and base_fair > 0 else np.nan
+                if np.isfinite(ratio) and 0.65 <= ratio <= 1.50:
+                    components = [(v, (w / base_weight_sum) * 0.95, label)
+                                  for v, w, label in components] if base_weight_sum > 0 else components
+                    components.append((ddm_value, 0.05, 'خصم التوزيعات DDM — وزن مساعد 5%'))
+                    ddm_blended = True
+                else:
+                    flags.append('قيمة DDM بعيدة عن تقييم الأرباح/الدفترية بأكثر من النطاق المسموح؛ عُرضت للمراجعة ولم تدخل القيمة النهائية')
             else:
-                components.append((ddm_value, 1.0, 'خصم التوزيعات DDM'))
+                # DDM may stand alone only if the payout/earnings checks above passed.
+                components.append((ddm_value, 1.0, 'خصم التوزيعات DDM — طريقة وحيدة'))
+                ddm_blended = True
         if components:
             weight_sum = sum(x[1] for x in components)
             fair = sum(x[0] * x[1] for x in components) / weight_sum
@@ -907,7 +921,7 @@ def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summar
         if latest: confidence += 10
         if sector == 'غير محدد': confidence -= 10
         if flags: confidence -= 15
-        if np.isfinite(ddm_value): confidence += 5
+        if ddm_blended: confidence += 3
         confidence = int(max(0, min(100, confidence)))
         if used == 0:
             status = 'غير قابل للتقييم — بيانات ربحية/دفترية غير كافية'
@@ -929,6 +943,7 @@ def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summar
             'قيمة الربحية بمضاعف القطاع (جنيه)': round(pe_value, 2) if np.isfinite(pe_value) else np.nan,
             'قيمة الدفترية بمضاعف القطاع (جنيه)': round(pb_value, 2) if np.isfinite(pb_value) else np.nan,
             'قيمة نموذج خصم التوزيعات DDM (جنيه)': round(ddm_value, 2) if np.isfinite(ddm_value) else np.nan,
+            'هل دخل DDM في القيمة النهائية': 'نعم' if ddm_blended else ('لا — مرجع فقط/غير مؤهل' if np.isfinite(ddm_value) else 'لا — بيانات غير كافية'),
             'سنوات التوزيع المرصودة': int(div_years) if np.isfinite(div_years) else 0,
             'آخر توزيعات السهم المرصودة (جنيه)': round(last_div, 4) if np.isfinite(last_div) else np.nan,
             'نسبة التوزيعات إلى ربحية السهم %': round(payout_ratio, 2) if np.isfinite(payout_ratio) else np.nan,
@@ -1116,7 +1131,7 @@ if 'summary_results' in st.session_state:
 
     with tab7:
         st.markdown('### محرك القيمة العادلة — تفاصيل كل سهم')
-        st.warning('هذا إصدار أولي يعتمد على مضاعفات ربحية/قيمة دفترية مرجعية حسب القطاع، ويضيف DDM بوزن محدود فقط عند كفاية سجل التوزيعات واستدامتها وفق البيانات المتاحة. لا يستخدم DCF/FCFF كاملًا بعد، لأن التدفق الحر والإنفاق الرأسمالي وتكلفة رأس المال الموثوقة ليست متاحة باستمرار لكل الشركات. القيم المرجعية ليست مضاعفات سوقية مباشرة.')
+        st.warning('هذا إصدار أولي يعتمد على مضاعفات ربحية/قيمة دفترية مرجعية حسب القطاع، ويضيف DDM بوزن مساعد 5% فقط عند كفاية سجل التوزيعات وتوافقه مع بقية النماذج. لا يستخدم DCF/FCFF كاملًا بعد، لأن التدفق الحر والإنفاق الرأسمالي وتكلفة رأس المال الموثوقة ليست متاحة باستمرار لكل الشركات. القيم المرجعية ليست مضاعفات سوقية مباشرة.')
         if valuation_df.empty:
             st.info('لا توجد نتائج تقييم. اجلب البيانات المالية أولًا.')
         else:
@@ -1142,7 +1157,7 @@ if 'summary_results' in st.session_state:
             st.download_button('⬇️ تنزيل تقرير القيمة العادلة CSV', vv.to_csv(index=False).encode('utf-8-sig'), 'egx_fair_value_report.csv', 'text/csv')
             with st.expander('كيف يحسب المحرك القيمة العادلة؟'):
                 st.markdown("""1. **مضاعف الربحية:** صافي الربح السنوي ÷ عدد الأسهم، ثم مضاعف مرجعي للقطاع. عند توفر ربحيتين سنويتين موجبتين، يستخدم المحرك مزيجًا 70% من أحدث ربحية و30% من السابقة لتخفيف أثر سنة استثنائية.\n2. **مضاعف القيمة الدفترية:** القيمة الدفترية للسهم × مضاعف مرجعي للقطاع.\n3. **تعديل جودة الشركة:** يستخدم درجة القوة المالية من المرحلة الرابعة لتعديل المضاعفات بنسبة محدودة بين 0.85 و1.15؛ لا تُستخدم الدرجة إذا كانت البيانات الأساسية غير كافية.
-4. **دمج الطريقتين:** أوزان قطاعية؛ للبنوك وزن أعلى للقيمة الدفترية، وللشركات التشغيلية وزن أعلى للربحية. إذا توفرت طريقة واحدة فقط، لا يخترع المحرك الثانية.\n5. **النطاق:** ±20% حول القيمة الوسطية للتعبير عن عدم اليقين، وليس توقعًا مضمونًا. سعر الشراء بهامش أمان 20% = 80% من القيمة العادلة.\n6. **موانع الثقة:** يستبعد بعض المدخلات غير المنطقية سعريًا ويعرض تنبيهًا بدل تصحيح الوحدات تلقائيًا. راجع تنبيهات التقييم ومصدر القوائم قبل الاعتماد على أي رقم.\n7. **التوزيعات وDDM:** يضاف نموذج خصم التوزيعات بوزن محدود فقط عند وجود توزيعات مرصودة في 3 سنوات مختلفة على الأقل، وعائد مطلوب أعلى من نمو التوزيعات، وعدم تجاوز التوزيعات 100% من ربحية السهم عندما تتوفر هذه المقارنة. سجل Yahoo قد يكون ناقصًا؛ غياب السجل لا يعني عدم التوزيع. راجع الإفصاح الرسمي.
+4. **دمج الطريقتين:** أوزان قطاعية؛ للبنوك وزن أعلى للقيمة الدفترية، وللشركات التشغيلية وزن أعلى للربحية. إذا توفرت طريقة واحدة فقط، لا يخترع المحرك الثانية.\n5. **النطاق:** ±20% حول القيمة الوسطية للتعبير عن عدم اليقين، وليس توقعًا مضمونًا. سعر الشراء بهامش أمان 20% = 80% من القيمة العادلة.\n6. **موانع الثقة:** يستبعد بعض المدخلات غير المنطقية سعريًا ويعرض تنبيهًا بدل تصحيح الوحدات تلقائيًا. راجع تنبيهات التقييم ومصدر القوائم قبل الاعتماد على أي رقم.\n7. **التوزيعات وDDM:** لا يُدمج DDM في القيمة النهائية إلا إذا توافرت توزيعات مرصودة في 3 سنوات مختلفة على الأقل، وعائد مطلوب أعلى من نمو التوزيعات، ونسبة توزيع قابلة للاستدامة. عند وجود تقييم أساسي، يساهم DDM بوزن 5% فقط إذا كانت قيمته ضمن 65%-150% من التقييم الأساسي؛ وإلا يظهر كمرجع منفصل مع تنبيه ولا يخفض القيمة النهائية تلقائيًا. سجل Yahoo قد يكون ناقصًا؛ غياب السجل لا يعني عدم التوزيع. راجع الإفصاح الرسمي.
 8. **حدود مهمة:** مضاعفات القطاع افتراضات أولية وليست متوسطات سوقية حية. DDM حساس جدًا لافتراضات العائد والنمو، ولا يمثل ضمانًا أو توصية شراء.""")
 
 

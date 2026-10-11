@@ -401,11 +401,92 @@ def financial_history(symbol, years=5):
             'shares': shares, 'shares_date': shares_date, 'shares_source': shares_source, 'statement_comparisons': statement_comparisons}
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def dividend_history(symbol, years=5):
+    """Collect historical cash dividends per share. Preserve source/date and avoid treating missing data as zero."""
+    ticker = yf.Ticker(symbol + '.CA')
+    records = []
+    source = ''
+    try:
+        series = ticker.dividends
+        if series is not None and len(series):
+            ser = pd.to_numeric(series, errors='coerce').dropna().sort_index()
+            cutoff = pd.Timestamp.now(tz='UTC').tz_localize(None) - pd.DateOffset(years=max(1, int(years)))
+            try:
+                idx = pd.to_datetime(ser.index)
+                ser.index = idx.tz_localize(None) if getattr(idx, 'tz', None) is not None else idx
+            except Exception:
+                pass
+            ser = ser[ser.index >= cutoff]
+            for dt, value in ser.items():
+                if pd.notna(value) and float(value) > 0:
+                    records.append({'رمز السهم': symbol + '.CA', 'تاريخ التوزيع': pd.Timestamp(dt).strftime('%Y-%m-%d'),
+                                    'التوزيع النقدي للسهم': float(value), 'المصدر': 'Yahoo Finance — سجل التوزيعات',
+                                    'حالة التحقق': 'تاريخ وقيمة من المصدر؛ يلزم مطابقة الإفصاح الرسمي'})
+            if records:
+                source = 'Yahoo Finance — سجل التوزيعات'
+    except Exception:
+        pass
+    # Do not infer that no dividends were paid when the provider returns no history.
+    # StockAnalysis page is recorded as a verification link, but is not parsed blindly because
+    # table labels/units can change and may mix declared, ex-date and historical yields.
+    if not records:
+        source = ''
+    return {'records': records, 'source': source,
+            'url': f'https://stockanalysis.com/quote/egx/{quote(symbol)}/dividend/'}
+
+
+def build_dividend_summary(summary_df, dividend_history_df, annual_df):
+    """Aggregate observed cash dividends by calendar year; never turn absent history into zero."""
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame()
+    divs = dividend_history_df.copy() if dividend_history_df is not None else pd.DataFrame()
+    if not divs.empty:
+        divs['تاريخ التوزيع'] = pd.to_datetime(divs['تاريخ التوزيع'], errors='coerce')
+        divs['سنة التوزيع'] = divs['تاريخ التوزيع'].dt.year
+    annual = _latest_period_rows(annual_df)
+    rows = []
+    current_year = datetime.utcnow().year
+    for _, stock in summary_df.iterrows():
+        symbol = str(stock.get('رمز السهم', ''))
+        price = _num(stock, 'السعر من آخر إغلاق يومي (جنيه)')
+        part = divs[divs['رمز السهم'].astype(str).eq(symbol)].copy() if not divs.empty else pd.DataFrame()
+        year_totals = part.groupby('سنة التوزيع')['التوزيع النقدي للسهم'].sum().to_dict() if not part.empty else {}
+        # Prefer the most recent completed calendar year; current-year partial dividends can understate yield.
+        completed_years = [int(y) for y in year_totals if int(y) < current_year]
+        latest_year = max(completed_years) if completed_years else (max(year_totals) if year_totals else np.nan)
+        last_year_div = float(year_totals.get(latest_year, np.nan)) if pd.notna(latest_year) else np.nan
+        # Five-year aggregate is shown only when at least one dividend record exists; it is not an estimate.
+        five_year_total = float(part['التوزيع النقدي للسهم'].sum()) if not part.empty else np.nan
+        latest_date = part['تاريخ التوزيع'].max().strftime('%Y-%m-%d') if not part.empty and part['تاريخ التوزيع'].notna().any() else ''
+        yield_pct = last_year_div / price * 100 if np.isfinite(last_year_div) and np.isfinite(price) and price > 0 else np.nan
+        # EPS denominator comes from latest annual net income and current shares; flag as approximate.
+        a = annual[annual['رمز السهم'].astype(str).eq(symbol)].sort_values('نهاية الفترة', ascending=False) if not annual.empty else pd.DataFrame()
+        latest = a.iloc[0].to_dict() if not a.empty else {}
+        net_income = _num(latest, 'صافي الربح')
+        shares = _num(stock, 'عدد الأسهم')
+        eps = net_income / shares if np.isfinite(net_income) and np.isfinite(shares) and shares > 0 else np.nan
+        payout = last_year_div / eps * 100 if np.isfinite(last_year_div) and np.isfinite(eps) and eps > 0 else np.nan
+        years_observed = int(part['سنة التوزيع'].nunique()) if not part.empty else 0
+        status = ('لا توجد بيانات توزيعات من المصدر — لا يعني ذلك عدم التوزيع' if part.empty else
+                  ('تاريخ قصير؛ لا يستخدم DDM' if years_observed < 3 else 'تاريخ متاح؛ راجع الإفصاحات الرسمية'))
+        rows.append({'رمز السهم': symbol, 'آخر سنة توزيع متاحة': int(latest_year) if pd.notna(latest_year) else np.nan,
+                     'توزيعات السهم في آخر سنة مسجلة (جنيه)': last_year_div,
+                     'إجمالي توزيعات السهم خلال فترة الرصد (جنيه)': five_year_total,
+                     'عدد سنوات التوزيع المرصودة': years_observed, 'عائد التوزيعات حسب آخر سنة مسجلة %': yield_pct,
+                     'نسبة التوزيعات إلى ربحية السهم %': payout, 'آخر تاريخ توزيع مرصود': latest_date,
+                     'مصدر التوزيعات': 'Yahoo Finance — سجل التوزيعات' if not part.empty else '',
+                     'رابط مراجعة التوزيعات': f'https://stockanalysis.com/quote/egx/{symbol.replace(".CA", "")}/dividend/',
+                     'حالة بيانات التوزيعات': status})
+    return pd.DataFrame(rows)
+
+
 def analyze_symbol(symbol, years=5):
     y = yahoo_data(symbol)
     m = mubasher_bvps(symbol)
     s = stockanalysis_bvps(symbol)
     fin = financial_history(symbol, years)
+    div = dividend_history(symbol, years)
     options = [m, s, y]
     valid = [x for x in options if np.isfinite(x.get('bvps', np.nan)) and x.get('bvps', np.nan) > 0]
     chosen = valid[0] if valid else None
@@ -425,7 +506,9 @@ def analyze_symbol(symbol, years=5):
         'تاريخ عدد الأسهم': fin['shares_date'], 'مصدر عدد الأسهم': fin['shares_source'],
         'حقوق الملكية من Yahoo': y.get('equity', np.nan), 'تاريخ حقوق الملكية من Yahoo': y.get('period', ''),
         'حالة القيمة الدفترية': bvps_status, 'رابط مباشر': m.get('url', ''),
-        'رابط StockAnalysis': s.get('url', ''), '_annual': fin['annual'], '_quarterly': fin['quarterly'],
+        'رابط StockAnalysis': s.get('url', ''), 'رابط مراجعة التوزيعات': div.get('url', ''),
+        'مصدر سجل التوزيعات': div.get('source', ''), '_dividends': div.get('records', []),
+        '_annual': fin['annual'], '_quarterly': fin['quarterly'],
         '_shares_history': fin.get('shares_history', []), '_statement_comparisons': fin.get('statement_comparisons', [])}
 
 
@@ -717,7 +800,7 @@ SECTOR_MULTIPLES = {
     'غير محدد': {'pe': 8.0, 'pb': 1.00, 'pe_weight': 0.50, 'pb_weight': 0.50},
 }
 
-def build_fair_values(summary_df, annual_df, indicators_df=None):
+def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summary_df=None, required_return=0.25, dividend_growth=0.05):
     """Transparent relative valuation engine; refuses to force a value from weak or implausible inputs."""
     if summary_df is None or summary_df.empty:
         return pd.DataFrame()
@@ -725,6 +808,9 @@ def build_fair_values(summary_df, annual_df, indicators_df=None):
     ind_lookup = {}
     if indicators_df is not None and not indicators_df.empty and 'رمز السهم' in indicators_df:
         ind_lookup = {str(r['رمز السهم']): r.to_dict() for _, r in indicators_df.iterrows()}
+    div_lookup = {}
+    if dividend_summary_df is not None and not dividend_summary_df.empty and 'رمز السهم' in dividend_summary_df:
+        div_lookup = {str(r['رمز السهم']): r.to_dict() for _, r in dividend_summary_df.iterrows()}
     rows = []
     for _, summary in summary_df.iterrows():
         symbol = str(summary.get('رمز السهم', ''))
@@ -775,6 +861,30 @@ def build_fair_values(summary_df, annual_df, indicators_df=None):
             components.append((pe_value, mult['pe_weight'], 'الربحية ومضاعف القطاع'))
         if np.isfinite(pb_value) and pb_value > 0:
             components.append((pb_value, mult['pb_weight'], 'القيمة الدفترية ومضاعف القطاع'))
+        # DDM is used only when at least 3 distinct dividend years are observed and the last-year payout is positive.
+        div = div_lookup.get(symbol, {})
+        div_years = _num(div, 'عدد سنوات التوزيع المرصودة')
+        last_div = _num(div, 'توزيعات السهم في آخر سنة مسجلة (جنيه)')
+        payout_ratio = _num(div, 'نسبة التوزيعات إلى ربحية السهم %')
+        ddm_value = np.nan
+        ddm_eligible = (np.isfinite(div_years) and div_years >= 3 and np.isfinite(last_div) and last_div > 0
+                        and np.isfinite(required_return) and np.isfinite(dividend_growth)
+                        and required_return > dividend_growth and required_return > 0)
+        # Avoid using DDM where payouts appear unsustainable (>100% of positive EPS); absent payout data is not proof of sustainability.
+        if ddm_eligible and np.isfinite(payout_ratio) and 0 < payout_ratio <= 100:
+            next_dividend = last_div * (1 + dividend_growth)
+            ddm_candidate = next_dividend / (required_return - dividend_growth)
+            # Guard against implausibly extreme outputs relative to market price.
+            if np.isfinite(ddm_candidate) and ddm_candidate > 0 and (not np.isfinite(price) or ddm_candidate <= price * 5):
+                ddm_value = ddm_candidate
+        # Dividend model gets a limited weight; it does not replace earnings/book methods.
+        if np.isfinite(ddm_value):
+            if components:
+                base_weight_sum = sum(w for _, w, _ in components)
+                components = [(v, (w / base_weight_sum) * 0.85, label) for v, w, label in components] if base_weight_sum > 0 else components
+                components.append((ddm_value, 0.15, 'خصم التوزيعات DDM'))
+            else:
+                components.append((ddm_value, 1.0, 'خصم التوزيعات DDM'))
         if components:
             weight_sum = sum(x[1] for x in components)
             fair = sum(x[0] * x[1] for x in components) / weight_sum
@@ -797,6 +907,7 @@ def build_fair_values(summary_df, annual_df, indicators_df=None):
         if latest: confidence += 10
         if sector == 'غير محدد': confidence -= 10
         if flags: confidence -= 15
+        if np.isfinite(ddm_value): confidence += 5
         confidence = int(max(0, min(100, confidence)))
         if used == 0:
             status = 'غير قابل للتقييم — بيانات ربحية/دفترية غير كافية'
@@ -817,6 +928,12 @@ def build_fair_values(summary_df, annual_df, indicators_df=None):
             'ربحية السهم المحسوبة EPS (جنيه)': round(eps, 4) if np.isfinite(eps) else np.nan,
             'قيمة الربحية بمضاعف القطاع (جنيه)': round(pe_value, 2) if np.isfinite(pe_value) else np.nan,
             'قيمة الدفترية بمضاعف القطاع (جنيه)': round(pb_value, 2) if np.isfinite(pb_value) else np.nan,
+            'قيمة نموذج خصم التوزيعات DDM (جنيه)': round(ddm_value, 2) if np.isfinite(ddm_value) else np.nan,
+            'سنوات التوزيع المرصودة': int(div_years) if np.isfinite(div_years) else 0,
+            'آخر توزيعات السهم المرصودة (جنيه)': round(last_div, 4) if np.isfinite(last_div) else np.nan,
+            'نسبة التوزيعات إلى ربحية السهم %': round(payout_ratio, 2) if np.isfinite(payout_ratio) else np.nan,
+            'افتراض العائد المطلوب DDM %': round(required_return * 100, 2),
+            'افتراض نمو التوزيعات DDM %': round(dividend_growth * 100, 2),
             'مضاعف الربحية المرجعي': mult['pe'], 'مضاعف القيمة الدفترية المرجعي': mult['pb'],
             'مضاعف الربحية بعد تعديل القوة المالية': round(pe_mult_used, 2), 'مضاعف الدفترية بعد تعديل القوة المالية': round(pb_mult_used, 2),
             'درجة القوة المالية المستخدمة': round(financial_score, 1) if np.isfinite(financial_score) else np.nan,
@@ -828,13 +945,14 @@ def build_fair_values(summary_df, annual_df, indicators_df=None):
 
 
 st.title('📊 الأسهم المصرية — بيانات السعر والقوائم المالية')
-st.caption('مرحلة 1: السعر اليومي والقيمة الدفترية. مرحلة 2: القوائم السنوية والربع سنوية وعدد الأسهم. مرحلة 3: تدقيق الجودة. مرحلة 4: المؤشرات المالية. مرحلة 5: محرك القيمة العادلة القطاعي.')
+st.caption('مرحلة 1: السعر اليومي والقيمة الدفترية. مرحلة 2: القوائم السنوية والربع سنوية وعدد الأسهم. مرحلة 3: تدقيق الجودة. مرحلة 4: المؤشرات المالية. مرحلة 5: القيمة العادلة القطاعية. مرحلة 6: سجل التوزيعات النقدية وDDM عند كفاية البيانات.')
 with st.expander('مصادر البيانات وحدود التغطية', expanded=False):
     st.markdown('''- **السعر اليومي:** آخر إغلاق يومي متاح من Yahoo Finance، مع تاريخ الشمعة.
 - **القيمة الدفترية:** Mubasher ثم StockAnalysis ثم Yahoo Finance، مع إبقاء الخانة فارغة إذا لم نجد رقمًا صالحًا.
 - **القوائم المالية السنوية والربع سنوية:** Yahoo Finance أولًا، مع StockAnalysis كمصدر مستقل للاستكمال والمقارنة عند توفر الجداول.
 - **مصدر أولي للتحقق من الإفصاحات:** البورصة المصرية EGX؛ يفتح التطبيق صفحة البورصة الرسمية وروابط القوائم المالية في Mubasher للمراجعة اليدوية عند تعذر الاستخراج الآلي.
 - **عدد الأسهم:** سلسلة عدد الأسهم التاريخية من Yahoo عند توافرها؛ وإلا عدد الأسهم الحالي مع توضيح أن تاريخه غير متاح.
+- **التوزيعات النقدية:** سجل توزيعات Yahoo Finance عند توفره؛ يظل غياب السجل قيمة غير معروفة لا صفرًا، مع رابط منفصل للتحقق من توزيعات كل سهم.
 - **مهم:** تغطية Yahoo للأسهم المصرية غير كاملة. الفراغ لا يعني صفرًا. الأرقام تعرض كما أعادها المصدر، ويجب التحقق من العملة ووحدة العرض قبل استخدامها في التقييم.
 - **فحوص الجودة:** تكتشف القيم الناقصة والقديمة والتكرار واختلاف BVPS بين المصادر وتغير عدد الأسهم أو بند رأس المال عند توفره، وتُظهر فروق المطابقة بين حقوق الملكية/عدد الأسهم وBVPS كتنبيه للمراجعة لا كخطأ مؤكد. لا يُختار رقم متعارض تلقائيًا.''')
 
@@ -847,8 +965,8 @@ if st.button('🔄 جلب / تحديث البيانات', type='primary'):
 
 symbols = get_universe()
 st.info(f'عدد الرموز الفريدة داخل قائمة البرنامج: {len(symbols)} — الرموز التي لا تتوفر لها بيانات ستظل في النتائج مع توضيح الخانات الناقصة.')
-if st.button('▶️ ابدأ جلب البيانات المالية', type='primary'):
-    summaries, annual_rows, quarterly_rows, shares_history_rows, statement_comparisons = [], [], [], [], []
+if st.button('▶️ ابدأ جلب البيانات المالية والتوزيعات', type='primary'):
+    summaries, annual_rows, quarterly_rows, shares_history_rows, statement_comparisons, dividend_rows = [], [], [], [], [], []
     progress = st.progress(0); status = st.empty()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(analyze_symbol, sym, years): sym for sym in symbols}
@@ -859,6 +977,7 @@ if st.button('▶️ ابدأ جلب البيانات المالية', type='pri
                 result = future.result()
                 annual_rows.extend(result.pop('_annual', []))
                 quarterly_rows.extend(result.pop('_quarterly', []))
+                dividend_rows.extend(result.pop('_dividends', []))
                 shares_history_rows.extend(result.pop('_shares_history', []))
                 statement_comparisons.extend(result.pop('_statement_comparisons', []))
                 summaries.append(result)
@@ -875,6 +994,7 @@ if st.button('▶️ ابدأ جلب البيانات المالية', type='pri
     st.session_state['quarterly_results'] = pd.DataFrame(quarterly_rows)
     st.session_state['shares_history_results'] = pd.DataFrame(shares_history_rows)
     st.session_state['statement_comparisons'] = pd.DataFrame(statement_comparisons)
+    st.session_state['dividend_history_results'] = pd.DataFrame(dividend_rows)
 
 if 'summary_results' in st.session_state:
     summary_df = st.session_state['summary_results']
@@ -882,6 +1002,7 @@ if 'summary_results' in st.session_state:
     quarterly_df = st.session_state.get('quarterly_results', pd.DataFrame())
     shares_history_df = st.session_state.get('shares_history_results', pd.DataFrame())
     statement_comparisons_df = st.session_state.get('statement_comparisons', pd.DataFrame())
+    dividend_history_df = st.session_state.get('dividend_history_results', pd.DataFrame())
     quality_df = build_quality_report(summary_df, annual_df, quarterly_df, shares_history_df)
     a, b, c, d = st.columns(4)
     a.metric('إجمالي الرموز', len(summary_df))
@@ -889,16 +1010,26 @@ if 'summary_results' in st.session_state:
     c.metric('أسهم لها بيانات سنوية', int(annual_df['رمز السهم'].nunique()) if not annual_df.empty else 0)
     d.metric('أسهم لها بيانات ربع سنوية', int(quarterly_df['رمز السهم'].nunique()) if not quarterly_df.empty else 0)
     indicators_df = build_financial_indicators(summary_df, annual_df, quarterly_df)
-    valuation_df = build_fair_values(summary_df, annual_df, indicators_df)
+    dividend_summary_df = build_dividend_summary(summary_df, dividend_history_df, annual_df)
+    with st.expander('⚙️ افتراضات نموذج خصم التوزيعات DDM', expanded=False):
+        st.caption('هذه افتراضات يدوية وليست توقعات تلقائية. DDM لن يدخل التقييم إلا عند توافر سجل توزيعات كافٍ وبشروط الاستدامة المحددة.')
+        ddm_col1, ddm_col2 = st.columns(2)
+        required_return = ddm_col1.slider('العائد السنوي المطلوب DDM %', 10, 40, 25, 1) / 100
+        dividend_growth = ddm_col2.slider('نمو التوزيعات السنوي المفترض %', -5, 10, 5, 1) / 100
+        if required_return <= dividend_growth:
+            st.error('يجب أن يكون العائد المطلوب أكبر من معدل نمو التوزيعات؛ لن يُستخدم DDM حتى تصحيح الافتراضات.')
+    valuation_df = build_fair_values(summary_df, annual_df, indicators_df, dividend_summary_df, required_return, dividend_growth)
+    if not dividend_summary_df.empty:
+        summary_df = summary_df.merge(dividend_summary_df, on='رمز السهم', how='left')
     if not valuation_df.empty:
         valuation_cols = [c for c in valuation_df.columns if c != 'رمز السهم']
         summary_df = summary_df.merge(valuation_df[['رمز السهم'] + valuation_cols], on='رمز السهم', how='left')
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['ملخص الأسهم والقيمة العادلة', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها', 'مؤشرات التحليل المالي', 'تفاصيل التقييم'])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(['ملخص الأسهم والقيمة العادلة', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها', 'مؤشرات التحليل المالي', 'تفاصيل التقييم', 'التوزيعات النقدية'])
     with tab1:
         st.markdown('### ملخص السوق والقيمة العادلة')
         st.caption('القيمة العادلة تقدير نسبي مبدئي مبني على مضاعفات قطاعية مرجعية، وليس DCF كاملًا أو توصية شراء. السعر هو آخر إغلاق يومي متاح.')
         st.dataframe(summary_df, use_container_width=True, hide_index=True,
-                     column_config={'رابط مباشر': st.column_config.LinkColumn('رابط مباشر'), 'رابط StockAnalysis': st.column_config.LinkColumn('رابط StockAnalysis')})
+                     column_config={'رابط مباشر': st.column_config.LinkColumn('رابط مباشر'), 'رابط StockAnalysis': st.column_config.LinkColumn('رابط StockAnalysis'), 'رابط مراجعة التوزيعات': st.column_config.LinkColumn('رابط مراجعة التوزيعات')})
         st.download_button('⬇️ تنزيل ملخص الأسهم مع القيمة العادلة CSV', summary_df.to_csv(index=False).encode('utf-8-sig'), 'egx_summary_fair_value.csv', 'text/csv')
     with tab2:
         if annual_df.empty:
@@ -985,7 +1116,7 @@ if 'summary_results' in st.session_state:
 
     with tab7:
         st.markdown('### محرك القيمة العادلة — تفاصيل كل سهم')
-        st.warning('هذا إصدار أولي يعتمد على مضاعفات ربحية/قيمة دفترية مرجعية حسب القطاع، ويعدل المضاعفات بشكل محدود وفق درجة القوة المالية في المرحلة الرابعة. لا يستخدم DCF/FCFF بعد، لأن التدفق الحر والإنفاق الرأسمالي وتكلفة رأس المال الموثوقة ليست متاحة باستمرار لكل الشركات. القيم المرجعية ليست مضاعفات سوقية مباشرة.')
+        st.warning('هذا إصدار أولي يعتمد على مضاعفات ربحية/قيمة دفترية مرجعية حسب القطاع، ويضيف DDM بوزن محدود فقط عند كفاية سجل التوزيعات واستدامتها وفق البيانات المتاحة. لا يستخدم DCF/FCFF كاملًا بعد، لأن التدفق الحر والإنفاق الرأسمالي وتكلفة رأس المال الموثوقة ليست متاحة باستمرار لكل الشركات. القيم المرجعية ليست مضاعفات سوقية مباشرة.')
         if valuation_df.empty:
             st.info('لا توجد نتائج تقييم. اجلب البيانات المالية أولًا.')
         else:
@@ -1011,5 +1142,27 @@ if 'summary_results' in st.session_state:
             st.download_button('⬇️ تنزيل تقرير القيمة العادلة CSV', vv.to_csv(index=False).encode('utf-8-sig'), 'egx_fair_value_report.csv', 'text/csv')
             with st.expander('كيف يحسب المحرك القيمة العادلة؟'):
                 st.markdown("""1. **مضاعف الربحية:** صافي الربح السنوي ÷ عدد الأسهم، ثم مضاعف مرجعي للقطاع. عند توفر ربحيتين سنويتين موجبتين، يستخدم المحرك مزيجًا 70% من أحدث ربحية و30% من السابقة لتخفيف أثر سنة استثنائية.\n2. **مضاعف القيمة الدفترية:** القيمة الدفترية للسهم × مضاعف مرجعي للقطاع.\n3. **تعديل جودة الشركة:** يستخدم درجة القوة المالية من المرحلة الرابعة لتعديل المضاعفات بنسبة محدودة بين 0.85 و1.15؛ لا تُستخدم الدرجة إذا كانت البيانات الأساسية غير كافية.
-4. **دمج الطريقتين:** أوزان قطاعية؛ للبنوك وزن أعلى للقيمة الدفترية، وللشركات التشغيلية وزن أعلى للربحية. إذا توفرت طريقة واحدة فقط، لا يخترع المحرك الثانية.\n5. **النطاق:** ±20% حول القيمة الوسطية للتعبير عن عدم اليقين، وليس توقعًا مضمونًا. سعر الشراء بهامش أمان 20% = 80% من القيمة العادلة.\n6. **موانع الثقة:** يستبعد بعض المدخلات غير المنطقية سعريًا ويعرض تنبيهًا بدل تصحيح الوحدات تلقائيًا. راجع تنبيهات التقييم ومصدر القوائم قبل الاعتماد على أي رقم.\n7. **حدود مهمة:** مضاعفات القطاع افتراضات أولية ثابتة داخل الكود وليست مستخرجة آليًا من متوسط شركات القطاع الحالية. لا توجد بعد نمذجة DCF مكتملة، أو توزيعات أرباح، أو تطبيع للتضخم/العملة، أو مراجعة لكل الإفصاحات الرسمية.""")
+4. **دمج الطريقتين:** أوزان قطاعية؛ للبنوك وزن أعلى للقيمة الدفترية، وللشركات التشغيلية وزن أعلى للربحية. إذا توفرت طريقة واحدة فقط، لا يخترع المحرك الثانية.\n5. **النطاق:** ±20% حول القيمة الوسطية للتعبير عن عدم اليقين، وليس توقعًا مضمونًا. سعر الشراء بهامش أمان 20% = 80% من القيمة العادلة.\n6. **موانع الثقة:** يستبعد بعض المدخلات غير المنطقية سعريًا ويعرض تنبيهًا بدل تصحيح الوحدات تلقائيًا. راجع تنبيهات التقييم ومصدر القوائم قبل الاعتماد على أي رقم.\n7. **التوزيعات وDDM:** يضاف نموذج خصم التوزيعات بوزن محدود فقط عند وجود توزيعات مرصودة في 3 سنوات مختلفة على الأقل، وعائد مطلوب أعلى من نمو التوزيعات، وعدم تجاوز التوزيعات 100% من ربحية السهم عندما تتوفر هذه المقارنة. سجل Yahoo قد يكون ناقصًا؛ غياب السجل لا يعني عدم التوزيع. راجع الإفصاح الرسمي.
+8. **حدود مهمة:** مضاعفات القطاع افتراضات أولية وليست متوسطات سوقية حية. DDM حساس جدًا لافتراضات العائد والنمو، ولا يمثل ضمانًا أو توصية شراء.""")
 
+
+
+    with tab8:
+        st.markdown('### التوزيعات النقدية — سجل تاريخي وعائد واستدامة')
+        st.info('يعرض هذا التبويب التوزيعات التي أعادها سجل Yahoo Finance فقط. عدم ظهور توزيعات لا يثبت أن الشركة لم توزع؛ تحقق من إفصاحات EGX وروابط StockAnalysis. نموذج DDM يدخل التقييم فقط عند اجتياز شروط كفاية التاريخ والاستدامة.')
+        if dividend_summary_df.empty:
+            st.warning('لا توجد بيانات ملخص للتوزيعات بعد. اضغط «ابدأ جلب البيانات المالية والتوزيعات».')
+        else:
+            dc1, dc2, dc3 = st.columns(3)
+            dc1.metric('أسهم لها سجل توزيعات', int((dividend_summary_df['عدد سنوات التوزيع المرصودة'] > 0).sum()))
+            dc2.metric('أسهم مؤهلة مبدئيًا لـ DDM', int(valuation_df['قيمة نموذج خصم التوزيعات DDM (جنيه)'].notna().sum()))
+            dc3.metric('سجلات توزيع مرصودة', len(dividend_history_df))
+            st.dataframe(dividend_summary_df, use_container_width=True, hide_index=True,
+                         column_config={'عائد التوزيعات حسب آخر سنة مسجلة %': st.column_config.NumberColumn(format='%.2f%%'),
+                                        'نسبة التوزيعات إلى ربحية السهم %': st.column_config.NumberColumn(format='%.2f%%'),
+                                        'رابط مراجعة التوزيعات': st.column_config.LinkColumn('رابط مراجعة التوزيعات')})
+            st.download_button('⬇️ تنزيل ملخص التوزيعات CSV', dividend_summary_df.to_csv(index=False).encode('utf-8-sig'), 'egx_dividend_summary.csv', 'text/csv')
+            if not dividend_history_df.empty:
+                with st.expander('سجل عمليات التوزيع الفردية'):
+                    st.dataframe(dividend_history_df.sort_values(['رمز السهم','تاريخ التوزيع'], ascending=[True,False]), use_container_width=True, hide_index=True)
+                    st.download_button('⬇️ تنزيل سجل التوزيعات التاريخي CSV', dividend_history_df.to_csv(index=False).encode('utf-8-sig'), 'egx_dividend_history.csv', 'text/csv')

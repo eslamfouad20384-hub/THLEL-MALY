@@ -877,28 +877,14 @@ def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summar
             # Guard against implausibly extreme outputs relative to market price.
             if np.isfinite(ddm_candidate) and ddm_candidate > 0 and (not np.isfinite(price) or ddm_candidate <= price * 5):
                 ddm_value = ddm_candidate
-        # DDM is a corroborating method, not an automatic downward adjustment.
-        # Blend it at only 5% when it is reasonably consistent with the existing
-        # earnings/book consensus. If it diverges materially, show it separately
-        # and flag it instead of letting a fragile dividend assumption distort fair value.
-        ddm_blended = False
+        # Dividend model gets a limited weight; it does not replace earnings/book methods.
         if np.isfinite(ddm_value):
             if components:
                 base_weight_sum = sum(w for _, w, _ in components)
-                base_fair = (sum(v * w for v, w, _ in components) / base_weight_sum
-                             if base_weight_sum > 0 else np.nan)
-                ratio = ddm_value / base_fair if np.isfinite(base_fair) and base_fair > 0 else np.nan
-                if np.isfinite(ratio) and 0.65 <= ratio <= 1.50:
-                    components = [(v, (w / base_weight_sum) * 0.95, label)
-                                  for v, w, label in components] if base_weight_sum > 0 else components
-                    components.append((ddm_value, 0.05, 'خصم التوزيعات DDM — وزن مساعد 5%'))
-                    ddm_blended = True
-                else:
-                    flags.append('قيمة DDM بعيدة عن تقييم الأرباح/الدفترية بأكثر من النطاق المسموح؛ عُرضت للمراجعة ولم تدخل القيمة النهائية')
+                components = [(v, (w / base_weight_sum) * 0.85, label) for v, w, label in components] if base_weight_sum > 0 else components
+                components.append((ddm_value, 0.15, 'خصم التوزيعات DDM'))
             else:
-                # DDM may stand alone only if the payout/earnings checks above passed.
-                components.append((ddm_value, 1.0, 'خصم التوزيعات DDM — طريقة وحيدة'))
-                ddm_blended = True
+                components.append((ddm_value, 1.0, 'خصم التوزيعات DDM'))
         if components:
             weight_sum = sum(x[1] for x in components)
             fair = sum(x[0] * x[1] for x in components) / weight_sum
@@ -921,7 +907,7 @@ def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summar
         if latest: confidence += 10
         if sector == 'غير محدد': confidence -= 10
         if flags: confidence -= 15
-        if ddm_blended: confidence += 3
+        if np.isfinite(ddm_value): confidence += 5
         confidence = int(max(0, min(100, confidence)))
         if used == 0:
             status = 'غير قابل للتقييم — بيانات ربحية/دفترية غير كافية'
@@ -943,7 +929,6 @@ def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summar
             'قيمة الربحية بمضاعف القطاع (جنيه)': round(pe_value, 2) if np.isfinite(pe_value) else np.nan,
             'قيمة الدفترية بمضاعف القطاع (جنيه)': round(pb_value, 2) if np.isfinite(pb_value) else np.nan,
             'قيمة نموذج خصم التوزيعات DDM (جنيه)': round(ddm_value, 2) if np.isfinite(ddm_value) else np.nan,
-            'هل دخل DDM في القيمة النهائية': 'نعم' if ddm_blended else ('لا — مرجع فقط/غير مؤهل' if np.isfinite(ddm_value) else 'لا — بيانات غير كافية'),
             'سنوات التوزيع المرصودة': int(div_years) if np.isfinite(div_years) else 0,
             'آخر توزيعات السهم المرصودة (جنيه)': round(last_div, 4) if np.isfinite(last_div) else np.nan,
             'نسبة التوزيعات إلى ربحية السهم %': round(payout_ratio, 2) if np.isfinite(payout_ratio) else np.nan,
@@ -958,6 +943,87 @@ def build_fair_values(summary_df, annual_df, indicators_df=None, dividend_summar
         })
     return pd.DataFrame(rows)
 
+
+
+def build_three_year_targets(summary_df, annual_df, indicators_df, valuation_df,
+                             conservative_offset=10.0, optimistic_offset=10.0,
+                             conservative_multiple=0.80, base_multiple=1.00, optimistic_multiple=1.15):
+    """Scenario-based 3-year price targets anchored to current fair value.
+
+    Historical growth is a noisy input, not a forecast. Growth is blended from
+    revenue and net-income growth when available, clipped to avoid extrapolating
+    extreme one-off years, and shown explicitly beside each target.
+    """
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame()
+    annual = _latest_period_rows(annual_df)
+    ind_lookup = {}
+    if indicators_df is not None and not indicators_df.empty and 'رمز السهم' in indicators_df:
+        ind_lookup = {str(r['رمز السهم']): r.to_dict() for _, r in indicators_df.iterrows()}
+    val_lookup = {}
+    if valuation_df is not None and not valuation_df.empty and 'رمز السهم' in valuation_df:
+        val_lookup = {str(r['رمز السهم']): r.to_dict() for _, r in valuation_df.iterrows()}
+    rows = []
+    for _, summary in summary_df.iterrows():
+        symbol = str(summary.get('رمز السهم', ''))
+        price = _num(summary, 'السعر من آخر إغلاق يومي (جنيه)')
+        ind = ind_lookup.get(symbol, {})
+        val = val_lookup.get(symbol, {})
+        fair = _num(val, 'القيمة العادلة التقديرية (جنيه)')
+        confidence = _num(val, 'ثقة نموذج التقييم /100')
+        sector = str(val.get('قطاع التقييم', classify_sector(symbol)))
+        rev_g = _num(ind, 'نمو الإيرادات سنويًا %')
+        profit_g = _num(ind, 'نمو صافي الربح سنويًا %')
+        candidates = [x for x in (rev_g, profit_g) if np.isfinite(x)]
+        # If both are available, profit growth receives a little more weight, but
+        # only after winsorization to reduce the impact of abnormal base effects.
+        if len(candidates) == 2:
+            expected_growth = 0.40 * float(np.clip(rev_g, -30, 40)) + 0.60 * float(np.clip(profit_g, -30, 40))
+        elif len(candidates) == 1:
+            expected_growth = float(np.clip(candidates[0], -30, 40))
+        else:
+            expected_growth = np.nan
+        # Require a usable current fair value and at least one actual growth signal.
+        # We intentionally do not manufacture a target from a missing valuation or growth history.
+        eligible = np.isfinite(fair) and fair > 0 and np.isfinite(expected_growth) and np.isfinite(confidence) and confidence >= 45
+        if eligible:
+            g_cons = float(np.clip(expected_growth - abs(conservative_offset), -35, 30)) / 100.0
+            g_base = float(np.clip(expected_growth, -30, 35)) / 100.0
+            g_opt = float(np.clip(expected_growth + abs(optimistic_offset), -20, 45)) / 100.0
+            # Targets are scenario estimates, not probability-weighted promises.
+            target_cons = fair * ((1 + g_cons) ** 3) * conservative_multiple
+            target_base = fair * ((1 + g_base) ** 3) * base_multiple
+            target_opt = fair * ((1 + g_opt) ** 3) * optimistic_multiple
+            # Guard against invalid values if assumptions are changed in the UI.
+            targets = [max(0.0, x) if np.isfinite(x) else np.nan for x in (target_cons, target_base, target_opt)]
+            target_cons, target_base, target_opt = targets
+            reason = 'تقدير سيناريوي؛ يعتمد على نمو تاريخي والقيمة العادلة الحالية'
+        else:
+            g_cons = g_base = g_opt = np.nan
+            target_cons = target_base = target_opt = np.nan
+            reason = 'لا توجد قيمة عادلة موثوقة أو بيانات نمو كافية/ثقة التقييم أقل من 45'
+        def ret(target):
+            return (target / price - 1) * 100 if np.isfinite(target) and np.isfinite(price) and price > 0 else np.nan
+        rows.append({
+            'رمز السهم': symbol, 'قطاع التوقع': sector,
+            'السعر الحالي (جنيه)': round(price, 2) if np.isfinite(price) else np.nan,
+            'القيمة العادلة الحالية (جنيه)': round(fair, 2) if np.isfinite(fair) else np.nan,
+            'نمو الإيرادات التاريخي المستخدم %': round(rev_g, 2) if np.isfinite(rev_g) else np.nan,
+            'نمو صافي الربح التاريخي المستخدم %': round(profit_g, 2) if np.isfinite(profit_g) else np.nan,
+            'معدل النمو السنوي المرجعي للسيناريو %': round(expected_growth, 2) if np.isfinite(expected_growth) else np.nan,
+            'نمو سنوي مفترض متحفظ %': round(g_cons * 100, 2) if np.isfinite(g_cons) else np.nan,
+            'هدف 3 سنوات متحفظ (جنيه)': round(target_cons, 2) if np.isfinite(target_cons) else np.nan,
+            'العائد السعري المتحفظ من اليوم %': round(ret(target_cons), 2),
+            'نمو سنوي مفترض أساسي %': round(g_base * 100, 2) if np.isfinite(g_base) else np.nan,
+            'هدف 3 سنوات أساسي (جنيه)': round(target_base, 2) if np.isfinite(target_base) else np.nan,
+            'العائد السعري الأساسي من اليوم %': round(ret(target_base), 2),
+            'نمو سنوي مفترض متفائل %': round(g_opt * 100, 2) if np.isfinite(g_opt) else np.nan,
+            'هدف 3 سنوات متفائل (جنيه)': round(target_opt, 2) if np.isfinite(target_opt) else np.nan,
+            'العائد السعري المتفائل من اليوم %': round(ret(target_opt), 2),
+            'ثقة التقييم الحالي /100': confidence,
+            'حالة هدف 3 سنوات': reason,
+        })
+    return pd.DataFrame(rows)
 
 st.title('📊 الأسهم المصرية — بيانات السعر والقوائم المالية')
 st.caption('مرحلة 1: السعر اليومي والقيمة الدفترية. مرحلة 2: القوائم السنوية والربع سنوية وعدد الأسهم. مرحلة 3: تدقيق الجودة. مرحلة 4: المؤشرات المالية. مرحلة 5: القيمة العادلة القطاعية. مرحلة 6: سجل التوزيعات النقدية وDDM عند كفاية البيانات.')
@@ -1039,7 +1105,22 @@ if 'summary_results' in st.session_state:
     if not valuation_df.empty:
         valuation_cols = [c for c in valuation_df.columns if c != 'رمز السهم']
         summary_df = summary_df.merge(valuation_df[['رمز السهم'] + valuation_cols], on='رمز السهم', how='left')
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(['ملخص الأسهم والقيمة العادلة', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها', 'مؤشرات التحليل المالي', 'تفاصيل التقييم', 'التوزيعات النقدية'])
+    with st.expander('⚙️ افتراضات أهداف السنوات الثلاث', expanded=False):
+        st.caption('الأهداف سيناريوهات حسابية وليست تنبؤات مؤكدة. النمو مبني على آخر نمو سنوي متاح للإيرادات والأرباح، ويُقصّ عند الحدود لتقليل أثر السنوات الشاذة. إذا لم توجد بيانات نمو أو قيمة عادلة بثقة كافية، لا يُختلق هدف.')
+        sc1, sc2, sc3 = st.columns(3)
+        conservative_offset = sc1.slider('خصم النمو في السيناريو المتحفظ (نقطة مئوية)', 0, 25, 10, 1)
+        optimistic_offset = sc2.slider('إضافة النمو في السيناريو المتفائل (نقطة مئوية)', 0, 25, 10, 1)
+        base_multiple = 1.00
+        conservative_multiple = sc3.slider('معامل التقييم المتحفظ', 0.50, 1.00, 0.80, 0.05)
+        opt_col1, opt_col2 = st.columns(2)
+        base_multiple = opt_col1.slider('معامل التقييم الأساسي', 0.80, 1.20, 1.00, 0.05)
+        optimistic_multiple = opt_col2.slider('معامل التقييم المتفائل', 1.00, 1.50, 1.15, 0.05)
+    targets_df = build_three_year_targets(summary_df, annual_df, indicators_df, valuation_df,
+        conservative_offset, optimistic_offset, conservative_multiple, base_multiple, optimistic_multiple)
+    if not targets_df.empty:
+        target_cols = [c for c in targets_df.columns if c != 'رمز السهم']
+        summary_df = summary_df.merge(targets_df[['رمز السهم'] + target_cols], on='رمز السهم', how='left')
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(['ملخص الأسهم والقيمة العادلة', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها', 'مؤشرات التحليل المالي', 'تفاصيل التقييم', 'التوزيعات النقدية', 'أهداف 3 سنوات'])
     with tab1:
         st.markdown('### ملخص السوق والقيمة العادلة')
         st.caption('القيمة العادلة تقدير نسبي مبدئي مبني على مضاعفات قطاعية مرجعية، وليس DCF كاملًا أو توصية شراء. السعر هو آخر إغلاق يومي متاح.')
@@ -1131,7 +1212,7 @@ if 'summary_results' in st.session_state:
 
     with tab7:
         st.markdown('### محرك القيمة العادلة — تفاصيل كل سهم')
-        st.warning('هذا إصدار أولي يعتمد على مضاعفات ربحية/قيمة دفترية مرجعية حسب القطاع، ويضيف DDM بوزن مساعد 5% فقط عند كفاية سجل التوزيعات وتوافقه مع بقية النماذج. لا يستخدم DCF/FCFF كاملًا بعد، لأن التدفق الحر والإنفاق الرأسمالي وتكلفة رأس المال الموثوقة ليست متاحة باستمرار لكل الشركات. القيم المرجعية ليست مضاعفات سوقية مباشرة.')
+        st.warning('هذا إصدار أولي يعتمد على مضاعفات ربحية/قيمة دفترية مرجعية حسب القطاع، ويضيف DDM بوزن محدود فقط عند كفاية سجل التوزيعات واستدامتها وفق البيانات المتاحة. لا يستخدم DCF/FCFF كاملًا بعد، لأن التدفق الحر والإنفاق الرأسمالي وتكلفة رأس المال الموثوقة ليست متاحة باستمرار لكل الشركات. القيم المرجعية ليست مضاعفات سوقية مباشرة.')
         if valuation_df.empty:
             st.info('لا توجد نتائج تقييم. اجلب البيانات المالية أولًا.')
         else:
@@ -1157,10 +1238,47 @@ if 'summary_results' in st.session_state:
             st.download_button('⬇️ تنزيل تقرير القيمة العادلة CSV', vv.to_csv(index=False).encode('utf-8-sig'), 'egx_fair_value_report.csv', 'text/csv')
             with st.expander('كيف يحسب المحرك القيمة العادلة؟'):
                 st.markdown("""1. **مضاعف الربحية:** صافي الربح السنوي ÷ عدد الأسهم، ثم مضاعف مرجعي للقطاع. عند توفر ربحيتين سنويتين موجبتين، يستخدم المحرك مزيجًا 70% من أحدث ربحية و30% من السابقة لتخفيف أثر سنة استثنائية.\n2. **مضاعف القيمة الدفترية:** القيمة الدفترية للسهم × مضاعف مرجعي للقطاع.\n3. **تعديل جودة الشركة:** يستخدم درجة القوة المالية من المرحلة الرابعة لتعديل المضاعفات بنسبة محدودة بين 0.85 و1.15؛ لا تُستخدم الدرجة إذا كانت البيانات الأساسية غير كافية.
-4. **دمج الطريقتين:** أوزان قطاعية؛ للبنوك وزن أعلى للقيمة الدفترية، وللشركات التشغيلية وزن أعلى للربحية. إذا توفرت طريقة واحدة فقط، لا يخترع المحرك الثانية.\n5. **النطاق:** ±20% حول القيمة الوسطية للتعبير عن عدم اليقين، وليس توقعًا مضمونًا. سعر الشراء بهامش أمان 20% = 80% من القيمة العادلة.\n6. **موانع الثقة:** يستبعد بعض المدخلات غير المنطقية سعريًا ويعرض تنبيهًا بدل تصحيح الوحدات تلقائيًا. راجع تنبيهات التقييم ومصدر القوائم قبل الاعتماد على أي رقم.\n7. **التوزيعات وDDM:** لا يُدمج DDM في القيمة النهائية إلا إذا توافرت توزيعات مرصودة في 3 سنوات مختلفة على الأقل، وعائد مطلوب أعلى من نمو التوزيعات، ونسبة توزيع قابلة للاستدامة. عند وجود تقييم أساسي، يساهم DDM بوزن 5% فقط إذا كانت قيمته ضمن 65%-150% من التقييم الأساسي؛ وإلا يظهر كمرجع منفصل مع تنبيه ولا يخفض القيمة النهائية تلقائيًا. سجل Yahoo قد يكون ناقصًا؛ غياب السجل لا يعني عدم التوزيع. راجع الإفصاح الرسمي.
+4. **دمج الطريقتين:** أوزان قطاعية؛ للبنوك وزن أعلى للقيمة الدفترية، وللشركات التشغيلية وزن أعلى للربحية. إذا توفرت طريقة واحدة فقط، لا يخترع المحرك الثانية.\n5. **النطاق:** ±20% حول القيمة الوسطية للتعبير عن عدم اليقين، وليس توقعًا مضمونًا. سعر الشراء بهامش أمان 20% = 80% من القيمة العادلة.\n6. **موانع الثقة:** يستبعد بعض المدخلات غير المنطقية سعريًا ويعرض تنبيهًا بدل تصحيح الوحدات تلقائيًا. راجع تنبيهات التقييم ومصدر القوائم قبل الاعتماد على أي رقم.\n7. **التوزيعات وDDM:** يضاف نموذج خصم التوزيعات بوزن محدود فقط عند وجود توزيعات مرصودة في 3 سنوات مختلفة على الأقل، وعائد مطلوب أعلى من نمو التوزيعات، وعدم تجاوز التوزيعات 100% من ربحية السهم عندما تتوفر هذه المقارنة. سجل Yahoo قد يكون ناقصًا؛ غياب السجل لا يعني عدم التوزيع. راجع الإفصاح الرسمي.
 8. **حدود مهمة:** مضاعفات القطاع افتراضات أولية وليست متوسطات سوقية حية. DDM حساس جدًا لافتراضات العائد والنمو، ولا يمثل ضمانًا أو توصية شراء.""")
 
 
+
+    with tab9:
+        st.markdown('### 🎯 الأهداف السعرية بعد 3 سنوات — متحفظ / أساسي / متفائل')
+        st.warning('هذه أهداف سيناريو وليست ضمانًا أو توصية شراء. تعتمد على القيمة العادلة الحالية ومعدل نمو تاريخي متاح، ولا تمثل نموذج توقع أرباح كاملًا. لا تشمل التوزيعات النقدية المستقبلية في العائد المعروض. راجع جودة البيانات ومصدر القوائم قبل اتخاذ القرار.')
+        if targets_df.empty:
+            st.info('لا توجد بيانات كافية لإنتاج أهداف. ابدأ جلب البيانات المالية أولًا.')
+        else:
+            tc1, tc2, tc3 = st.columns(3)
+            tc1.metric('أسهم لها هدف أساسي', int(targets_df['هدف 3 سنوات أساسي (جنيه)'].notna().sum()))
+            tc2.metric('أسهم لها هدف متحفظ', int(targets_df['هدف 3 سنوات متحفظ (جنيه)'].notna().sum()))
+            tc3.metric('أسهم لها هدف متفائل', int(targets_df['هدف 3 سنوات متفائل (جنيه)'].notna().sum()))
+            show_missing = st.checkbox('إظهار الأسهم التي لا تتوفر لها أهداف أيضًا', value=True)
+            target_view = targets_df.copy()
+            if not show_missing:
+                target_view = target_view[target_view['هدف 3 سنوات أساسي (جنيه)'].notna()]
+            target_view = target_view.sort_values('العائد السعري الأساسي من اليوم %', ascending=False, na_position='last')
+            st.dataframe(target_view, use_container_width=True, hide_index=True,
+                column_config={
+                    'هدف 3 سنوات متحفظ (جنيه)': st.column_config.NumberColumn(format='%.2f'),
+                    'هدف 3 سنوات أساسي (جنيه)': st.column_config.NumberColumn(format='%.2f'),
+                    'هدف 3 سنوات متفائل (جنيه)': st.column_config.NumberColumn(format='%.2f'),
+                    'العائد السعري المتحفظ من اليوم %': st.column_config.NumberColumn(format='%.1f%%'),
+                    'العائد السعري الأساسي من اليوم %': st.column_config.NumberColumn(format='%.1f%%'),
+                    'العائد السعري المتفائل من اليوم %': st.column_config.NumberColumn(format='%.1f%%'),
+                    'ثقة التقييم الحالي /100': st.column_config.ProgressColumn(min_value=0, max_value=100, format='%d'),
+                })
+            st.download_button('⬇️ تنزيل أهداف 3 سنوات CSV', target_view.to_csv(index=False).encode('utf-8-sig'), 'egx_three_year_targets.csv', 'text/csv')
+            with st.expander('منهجية الحساب وحدودها'):
+                st.markdown("""
+- **النمو المرجعي:** إذا توفر نمو الإيرادات وصافي الربح، يُحسب متوسط مرجّح (40% للإيرادات و60% لصافي الربح)، بعد حصر القيم المتطرفة. إذا توفر أحدهما فقط يُستخدم المتاح ويظهر مصدره في الأعمدة.
+- **المتحفظ:** النمو المرجعي ناقص الخصم المحدد، مع معامل تقييم أقل من 1.
+- **الأساسي:** النمو المرجعي كما هو، ومعامل التقييم الأساسي الذي تحدده.
+- **المتفائل:** النمو المرجعي زائد الزيادة المحددة، مع معامل تقييم أعلى.
+- **المعادلة:** القيمة العادلة الحالية × (1 + النمو السنوي المفترض)³ × معامل التقييم للسيناريو.
+- الأهداف لا تظهر إذا لم تتوفر قيمة عادلة موجبة وثقة تقييم لا تقل عن 45/100 ونمو تاريخي قابل للحساب. وهذا لا يعني أن السهم سيئ؛ بل أن البيانات لا تكفي لهذا النموذج.
+- النمو التاريخي لا يضمن استمرار النمو مستقبلًا، ومضاعفات التقييم قد تتغير، كما أن التضخم وسعر الصرف وزيادات رأس المال وتغير عدد الأسهم قد تؤثر في النتائج. العوائد المعروضة سعرية فقط ولا تشمل التوزيعات.
+                """)
 
     with tab8:
         st.markdown('### التوزيعات النقدية — سجل تاريخي وعائد واستدامة')

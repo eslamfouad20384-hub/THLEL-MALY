@@ -213,6 +213,8 @@ def stockanalysis_financial_history(symbol, years=5):
         ('سنوي', base + 'balance-sheet/'),
         ('ربع سنوي', base + '?p=quarterly'),
         ('ربع سنوي', base + 'balance-sheet/?p=quarterly'),
+        ('سنوي', base + 'cash-flow-statement/'),
+        ('ربع سنوي', base + 'cash-flow-statement/?p=quarterly'),
     ]
     aliases = {
         'الإيرادات / المبيعات': ['revenue', 'total revenue', 'operating revenue'],
@@ -221,6 +223,7 @@ def stockanalysis_financial_history(symbol, years=5):
         'إجمالي الالتزامات': ['total liabilities'],
         'حقوق الملكية': ['shareholders equity', "shareholders' equity", 'total common equity', 'total equity'],
         'رأس المال / الأسهم العادية': ['common stock', 'common shares outstanding', 'total common shares outstanding'],
+        'التدفقات النقدية التشغيلية': ['operating cash flow', 'cash from operations', 'cash flow from operations', 'net cash provided by operating activities'],
     }
     out = []
     for frequency, url in pages:
@@ -246,7 +249,7 @@ def stockanalysis_financial_history(symbol, years=5):
                 table.columns = cols
                 label_col = table.columns[0]
                 labels = table[label_col].astype(str).str.strip()
-                if not labels.str.contains(r'Revenue|Net Income|Total Assets|Total Liabilities|Shareholders.? Equity|Common Stock', case=False, regex=True).any():
+                if not labels.str.contains(r'Revenue|Net Income|Total Assets|Total Liabilities|Shareholders.? Equity|Common Stock|Operating Cash Flow|Cash from Operations|Cash Flow from Operations|Net Cash Provided by Operating Activities', case=False, regex=True).any():
                     continue
                 # A Period Ending row gives exact month/quarter ends; otherwise use period headers.
                 date_by_col = {}
@@ -272,7 +275,7 @@ def stockanalysis_financial_history(symbol, years=5):
                         pass
                     row = {'رمز السهم': symbol + '.CA', 'نوع الفترة': frequency, 'نهاية الفترة': period_date,
                            'الإيرادات / المبيعات': np.nan, 'صافي الربح': np.nan, 'إجمالي الأصول': np.nan,
-                           'إجمالي الالتزامات': np.nan, 'حقوق الملكية': np.nan, 'رأس المال / الأسهم العادية': np.nan,
+                           'إجمالي الالتزامات': np.nan, 'حقوق الملكية': np.nan, 'رأس المال / الأسهم العادية': np.nan, 'التدفقات النقدية التشغيلية': np.nan,
                            'مصدر البيانات المالية': 'StockAnalysis', 'وحدة المصدر الأصلية': 'ملايين جنيه مصري' if multiplier == 1e6 else 'الوحدة كما ظهرت بالمصدر'}
                     for _, tr in table.iterrows():
                         label = str(tr[label_col]).strip().lower()
@@ -309,6 +312,8 @@ def financial_history(symbol, years=5):
     annual_bs = _safe_statement(ticker, 'balance_sheet')
     quarterly_income = _safe_statement(ticker, 'quarterly_income_stmt')
     quarterly_bs = _safe_statement(ticker, 'quarterly_balance_sheet')
+    annual_cf = _safe_statement(ticker, 'cashflow')
+    quarterly_cf = _safe_statement(ticker, 'quarterly_cashflow')
     field_candidates = {
         'الإيرادات / المبيعات': ['Total Revenue', 'Operating Revenue', 'Revenue', 'Total Operating Income'],
         'صافي الربح': ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing Operation Net Minority Interest', 'Net Income Including Noncontrolling Interests'],
@@ -316,11 +321,17 @@ def financial_history(symbol, years=5):
         'إجمالي الالتزامات': ['Total Liabilities Net Minority Interest', 'Total Liabilities', 'Total Liab'],
         'حقوق الملكية': ['Stockholders Equity', 'Total Equity Gross Minority Interest', 'Common Stock Equity', 'Total Stockholder Equity', 'Stockholders Equity Including Minority Interest'],
         'رأس المال / الأسهم العادية': ['Common Stock', 'Capital Stock', 'Ordinary Share Capital'],
+        'التدفقات النقدية التشغيلية': ['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities', 'Net Cash Provided By Operating Activities', 'Cash From Operations'],
     }
-    def build_period_rows(income_df, bs_df, frequency):
+    def build_period_rows(income_df, bs_df, cf_df, frequency):
         values = {}
         for label, candidates in field_candidates.items():
-            src = income_df if label in ('الإيرادات / المبيعات', 'صافي الربح') else bs_df
+            if label in ('الإيرادات / المبيعات', 'صافي الربح'):
+                src = income_df
+            elif label == 'التدفقات النقدية التشغيلية':
+                src = cf_df
+            else:
+                src = bs_df
             values[label] = _statement_row(src, candidates)
         dates = sorted(set().union(*(set(v.keys()) for v in values.values())), reverse=True)
         dates = dates[:max(3, min(int(years), 5))] if frequency == 'سنوي' else dates[:8]
@@ -328,18 +339,18 @@ def financial_history(symbol, years=5):
         for date in dates:
             row = {'رمز السهم': symbol + '.CA', 'نوع الفترة': frequency, 'نهاية الفترة': date,
                    'الإيرادات / المبيعات': np.nan, 'صافي الربح': np.nan,
-                   'إجمالي الأصول': np.nan, 'إجمالي الالتزامات': np.nan, 'حقوق الملكية': np.nan, 'رأس المال / الأسهم العادية': np.nan,
+                   'إجمالي الأصول': np.nan, 'إجمالي الالتزامات': np.nan, 'حقوق الملكية': np.nan, 'رأس المال / الأسهم العادية': np.nan, 'التدفقات النقدية التشغيلية': np.nan,
                    'مصدر البيانات المالية': 'Yahoo Finance'}
             for label in field_candidates:
                 if date in values[label]: row[label] = values[label][date]
             rows.append(row)
         return rows
-    annual_rows = build_period_rows(annual_income, annual_bs, 'سنوي')
-    quarterly_rows = build_period_rows(quarterly_income, quarterly_bs, 'ربع سنوي')
+    annual_rows = build_period_rows(annual_income, annual_bs, annual_cf, 'سنوي')
+    quarterly_rows = build_period_rows(quarterly_income, quarterly_bs, quarterly_cf, 'ربع سنوي')
     # Add StockAnalysis as an independent fallback. Yahoo values are never silently overwritten.
     sa = stockanalysis_financial_history(symbol, years)
     statement_comparisons = []
-    financial_fields = ['الإيرادات / المبيعات', 'صافي الربح', 'إجمالي الأصول', 'إجمالي الالتزامات', 'حقوق الملكية']
+    financial_fields = ['الإيرادات / المبيعات', 'صافي الربح', 'إجمالي الأصول', 'إجمالي الالتزامات', 'حقوق الملكية', 'التدفقات النقدية التشغيلية']
     for freq_key, yahoo_rows in [('annual', annual_rows), ('quarterly', quarterly_rows)]:
         sa_rows = sa.get(freq_key, [])
         by_period = {str(r.get('نهاية الفترة')): r for r in sa_rows}
@@ -526,8 +537,174 @@ def build_quality_report(summary_df, annual_df, quarterly_df, shares_history_df)
     # Duplicate source rows across statement data are flagged, not silently removed.
     return pd.DataFrame(issues, columns=['رمز السهم','نوع الفحص','الخطورة','التفاصيل','البيانات المعنية','المصادر','الفترات','الوحدات / ملاحظات'])
 
+# ========================= المرحلة الرابعة: مؤشرات التحليل المالي =========================
+# تصنيف أولي للقطاعات؛ الرموز غير المؤكدة تظل "غير محدد" ولا يتم اختلاق قطاع لها.
+SECTOR_MAP = {
+    'بنوك': set('COMI ADIB CIEB QNBA HDBK UBEE FAIT EXPA CICH MUBI EGBE SAIB CANA'.split()),
+    'خدمات مالية غير مصرفية': set('HRHO EFGH CNFN MICH FWRY EFIH VALU BTFH RAYA RACC BINV NAEEM'.split()),
+    'عقارات': set('TMGH PHDC MNHD EMFD SODIC AMER ORHD OTHM OCDI ODIN HELI'.split()),
+    'صناعة ومواد أساسية': set('SWDY MMMT AUTO EGAL ESRS KZPC SPMD UEFM AMOC SKPC MFPC ABUK TAQA EGAS'.split()),
+    'أدوية ورعاية صحية': set('BIOC NIPH ISPH DAPH OCPH ODPH PHAR CLHO IDHC RMDA AXPH MIPH'.split()),
+    'اتصالات وتكنولوجيا': set('ETEL EFIH FWRY GBCO MTIE'.split()),
+    'أغذية ومشروبات': set('EAST JUFO DOMT OLFI POUL'.split()),
+    'طاقة وبترول': set('AMOC EGAS SKPC TAQA MOIL'.split()),
+}
+
+def classify_sector(symbol):
+    code = str(symbol).upper().replace('.CA','').strip()
+    for sector, members in SECTOR_MAP.items():
+        if code in members:
+            return sector
+    return 'غير محدد'
+
+
+def _num(row, key):
+    try:
+        v = pd.to_numeric(pd.Series([row.get(key, np.nan)]), errors='coerce').iloc[0]
+        return float(v) if pd.notna(v) and np.isfinite(v) else np.nan
+    except Exception:
+        return np.nan
+
+
+def _pct_change(current, previous):
+    if not np.isfinite(current) or not np.isfinite(previous) or abs(previous) < 1e-9:
+        return np.nan
+    # Growth is not economically interpretable as a conventional percentage when prior value <= 0.
+    if previous <= 0:
+        return np.nan
+    return (current / previous - 1.0) * 100.0
+
+
+def _latest_period_rows(frame):
+    if frame is None or frame.empty or 'نهاية الفترة' not in frame.columns:
+        return pd.DataFrame()
+    work = frame.copy()
+    work['نهاية الفترة'] = work['نهاية الفترة'].astype(str)
+    work = work.sort_values('نهاية الفترة', ascending=False)
+    # For duplicated same-period records, combine only missing cells; do not average conflicting values.
+    out = []
+    for (symbol, period), grp in work.groupby(['رمز السهم','نهاية الفترة'], dropna=False, sort=False):
+        row = grp.iloc[0].to_dict()
+        for col in work.columns:
+            if pd.isna(row.get(col, np.nan)):
+                candidates = grp[col].dropna() if col in grp else pd.Series(dtype=object)
+                if len(candidates): row[col] = candidates.iloc[0]
+        out.append(row)
+    return pd.DataFrame(out).sort_values('نهاية الفترة', ascending=False) if out else pd.DataFrame()
+
+
+def _score_metric(value, thresholds, reverse=False):
+    """Simple transparent heuristic score 0-100; not a valuation or investment recommendation."""
+    if not np.isfinite(value):
+        return np.nan
+    # thresholds is an ascending list of (minimum value, score)
+    score = 0
+    for threshold, points in thresholds:
+        if value >= threshold:
+            score = points
+    return 100 - score if reverse else score
+
+
+def build_financial_indicators(summary_df, annual_df, quarterly_df):
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame()
+    annual = _latest_period_rows(annual_df)
+    quarterly = _latest_period_rows(quarterly_df)
+    rows = []
+    for _, summary in summary_df.iterrows():
+        symbol = str(summary.get('رمز السهم',''))
+        sector = classify_sector(symbol)
+        a = annual[annual['رمز السهم'].astype(str).eq(symbol)].sort_values('نهاية الفترة', ascending=False) if not annual.empty else pd.DataFrame()
+        q = quarterly[quarterly['رمز السهم'].astype(str).eq(symbol)].sort_values('نهاية الفترة', ascending=False) if not quarterly.empty else pd.DataFrame()
+        latest = a.iloc[0].to_dict() if not a.empty else {}
+        previous = a.iloc[1].to_dict() if len(a) >= 2 else {}
+        latest_q = q.iloc[0].to_dict() if not q.empty else {}
+        # Revenue/profit growth only when periods are comparable and prior base is positive.
+        revenue_growth = _pct_change(_num(latest,'الإيرادات / المبيعات'), _num(previous,'الإيرادات / المبيعات'))
+        profit_growth = _pct_change(_num(latest,'صافي الربح'), _num(previous,'صافي الربح'))
+        # Annual growth must compare separate fiscal years, not two dates from the same year.
+        try:
+            latest_date = pd.to_datetime(latest.get('نهاية الفترة'), errors='coerce')
+            previous_date = pd.to_datetime(previous.get('نهاية الفترة'), errors='coerce')
+            if pd.isna(latest_date) or pd.isna(previous_date) or (latest_date - previous_date).days < 300:
+                revenue_growth = np.nan; profit_growth = np.nan
+        except Exception:
+            revenue_growth = np.nan; profit_growth = np.nan
+        quarterly_revenue_growth = np.nan; quarterly_profit_growth = np.nan
+        if not q.empty:
+            try:
+                q = q.copy(); q['_dt'] = pd.to_datetime(q['نهاية الفترة'], errors='coerce')
+                q_latest = q.iloc[0]
+                q_date = q_latest['_dt']
+                comparable = q[(q['_dt'] < q_date) & ((q_date - q['_dt']).dt.days.between(330, 400))]
+                if not comparable.empty:
+                    q_prev = comparable.sort_values('_dt', ascending=False).iloc[0]
+                    quarterly_revenue_growth = _pct_change(_num(q_latest, 'الإيرادات / المبيعات'), _num(q_prev, 'الإيرادات / المبيعات'))
+                    quarterly_profit_growth = _pct_change(_num(q_latest, 'صافي الربح'), _num(q_prev, 'صافي الربح'))
+            except Exception:
+                pass
+        revenue = _num(latest,'الإيرادات / المبيعات')
+        net_income = _num(latest,'صافي الربح')
+        assets = _num(latest,'إجمالي الأصول')
+        liabilities = _num(latest,'إجمالي الالتزامات')
+        equity = _num(latest,'حقوق الملكية')
+        prev_assets = _num(previous,'إجمالي الأصول')
+        prev_equity = _num(previous,'حقوق الملكية')
+        avg_assets = (assets + prev_assets)/2 if np.isfinite(assets) and np.isfinite(prev_assets) and assets + prev_assets != 0 else assets
+        avg_equity = (equity + prev_equity)/2 if np.isfinite(equity) and np.isfinite(prev_equity) and equity + prev_equity != 0 else equity
+        margin = net_income/revenue*100 if np.isfinite(net_income) and np.isfinite(revenue) and revenue > 0 else np.nan
+        roe = net_income/avg_equity*100 if np.isfinite(net_income) and np.isfinite(avg_equity) and avg_equity > 0 else np.nan
+        roa = net_income/avg_assets*100 if np.isfinite(net_income) and np.isfinite(avg_assets) and avg_assets > 0 else np.nan
+        leverage = liabilities/equity if np.isfinite(liabilities) and np.isfinite(equity) and equity > 0 else np.nan
+        cfo = _num(latest,'التدفقات النقدية التشغيلية')
+        quality = cfo/net_income if np.isfinite(cfo) and np.isfinite(net_income) and net_income > 0 else np.nan
+        # A bank's leverage and conventional net margin are not scored like a non-financial company.
+        if sector == 'بنوك':
+            weights = {'roe': .35, 'revenue_growth': .10, 'profit_growth': .20, 'margin': .05, 'cash_quality': .10, 'coverage': .20}
+        elif sector == 'عقارات':
+            weights = {'roe': .15, 'revenue_growth': .15, 'profit_growth': .20, 'margin': .15, 'roa': .10, 'leverage': .10, 'cash_quality': .10, 'coverage': .05}
+        elif sector == 'خدمات مالية غير مصرفية':
+            weights = {'roe': .20, 'revenue_growth': .15, 'profit_growth': .20, 'margin': .10, 'roa': .10, 'leverage': .05, 'cash_quality': .10, 'coverage': .10}
+        else:
+            weights = {'roe': .15, 'revenue_growth': .15, 'profit_growth': .20, 'margin': .10, 'roa': .10, 'leverage': .10, 'cash_quality': .10, 'coverage': .10}
+        metric_values = {
+            'roe': _score_metric(roe, [(0,20),(5,40),(10,60),(15,80),(20,100)]),
+            'revenue_growth': _score_metric(revenue_growth, [(-10,20),(0,35),(5,50),(10,65),(20,80),(30,100)]),
+            'profit_growth': _score_metric(profit_growth, [(-10,15),(0,30),(5,45),(10,60),(20,80),(30,100)]),
+            'margin': _score_metric(margin, [(0,20),(3,35),(7,50),(12,70),(20,85),(30,100)]),
+            'roa': _score_metric(roa, [(0,20),(1,35),(3,55),(5,75),(8,100)]),
+            'leverage': _score_metric(leverage, [(0,100),(0.5,85),(1,70),(2,50),(3,30),(5,10)], reverse=False),
+            'cash_quality': _score_metric(quality, [(0,10),(0.5,35),(0.8,60),(1,80),(1.2,100)]),
+        }
+        # Coverage score is explicit and based on availability of the core annual fields.
+        core = ['الإيرادات / المبيعات','صافي الربح','إجمالي الأصول','إجمالي الالتزامات','حقوق الملكية','التدفقات النقدية التشغيلية']
+        available = sum(np.isfinite(_num(latest, f)) for f in core)
+        coverage = available / len(core) * 100 if latest else 0
+        metric_values['coverage'] = coverage
+        valid_weight = sum(w for key,w in weights.items() if np.isfinite(metric_values.get(key,np.nan)))
+        score = sum(weights[key]*metric_values[key] for key in weights if np.isfinite(metric_values.get(key,np.nan))) / valid_weight if valid_weight else np.nan
+        # Do not present a score when data coverage is very low.
+        if available < 3:
+            score = np.nan
+        status = 'بيانات محدودة — لا يُعتمد على الدرجة' if available < 3 else ('مؤشر مبدئي' if available < 5 else 'مؤشر مبدئي ببيانات أفضل')
+        rows.append({
+            'رمز السهم': symbol, 'القطاع المبدئي': sector, 'آخر سنة مالية': latest.get('نهاية الفترة',''),
+            'نمو الإيرادات سنويًا %': revenue_growth, 'نمو صافي الربح سنويًا %': profit_growth,
+            'نمو الإيرادات ربع سنويًا مقابل نفس الربع السابق %': quarterly_revenue_growth, 'نمو صافي الربح ربع سنويًا مقابل نفس الربع السابق %': quarterly_profit_growth,
+            'هامش صافي الربح %': margin, 'ROE العائد على حقوق الملكية %': roe,
+            'ROA العائد على الأصول %': roa, 'الالتزامات / حقوق الملكية': leverage,
+            'التدفقات النقدية التشغيلية': cfo, 'جودة الأرباح CFO / صافي الربح': quality,
+            'السنة المالية السابقة': previous.get('نهاية الفترة',''), 'آخر ربع متاح': latest_q.get('نهاية الفترة',''),
+            'درجة القوة المالية المبدئية /100': round(score,1) if np.isfinite(score) else np.nan,
+            'تغطية البيانات الأساسية %': round(coverage,1), 'حالة المؤشر': status,
+            'مصدر القوائم السنوية': latest.get('مصدر البيانات المالية',''),
+            'تنبيه القطاع': 'نسب الرفع المالي وهامش الربح لا تُقارن مباشرة بين القطاعات؛ أوزان البنوك مختلفة، والتصنيف آلي مبدئي.'
+        })
+    return pd.DataFrame(rows)
+
+
 st.title('📊 الأسهم المصرية — بيانات السعر والقوائم المالية')
-st.caption('مرحلة 1: السعر اليومي والقيمة الدفترية. مرحلة 2: القوائم السنوية والربع سنوية وعدد الأسهم. مرحلة 3: تدقيق النقص والحداثة والتكرار واختلاف المصادر والمطابقة المحاسبية.')
+st.caption('مرحلة 1: السعر اليومي والقيمة الدفترية. مرحلة 2: القوائم السنوية والربع سنوية وعدد الأسهم. مرحلة 3: تدقيق جودة البيانات. مرحلة 4: مؤشرات مالية أولية مع أوزان قطاعية مختلفة.')
 with st.expander('مصادر البيانات وحدود التغطية', expanded=False):
     st.markdown('''- **السعر اليومي:** آخر إغلاق يومي متاح من Yahoo Finance، مع تاريخ الشمعة.
 - **القيمة الدفترية:** Mubasher ثم StockAnalysis ثم Yahoo Finance، مع إبقاء الخانة فارغة إذا لم نجد رقمًا صالحًا.
@@ -587,7 +764,7 @@ if 'summary_results' in st.session_state:
     b.metric('أسعار يومية متاحة', int(summary_df['السعر من آخر إغلاق يومي (جنيه)'].notna().sum()))
     c.metric('أسهم لها بيانات سنوية', int(annual_df['رمز السهم'].nunique()) if not annual_df.empty else 0)
     d.metric('أسهم لها بيانات ربع سنوية', int(quarterly_df['رمز السهم'].nunique()) if not quarterly_df.empty else 0)
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(['ملخص الأسهم', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها'])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['ملخص الأسهم', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها', 'مؤشرات التحليل المالي'])
     with tab1:
         st.dataframe(summary_df, use_container_width=True, hide_index=True,
                      column_config={'رابط مباشر': st.column_config.LinkColumn('رابط مباشر'), 'رابط StockAnalysis': st.column_config.LinkColumn('رابط StockAnalysis')})
@@ -642,3 +819,36 @@ if 'summary_results' in st.session_state:
         st.dataframe(links_df, use_container_width=True, hide_index=True,
                      column_config={c: st.column_config.LinkColumn(c) for c in links_df.columns if c != 'رمز السهم'})
         st.caption('البورصة المصرية هي مرجع الإفصاح الرسمي. بعض صفحات المصادر الخارجية تعتمد على جداول تُحمّل ديناميكيًا؛ عند تعذر قراءتها آليًا، استخدم الرابط للتحقق اليدوي. لا تعتبر الخانة الفارغة صفرًا، ولا تعتبر حداثة الصفحة دليلًا وحده على صحة الرقم.')
+
+
+    with tab6:
+        st.markdown('### مؤشرات التحليل المالي — المرحلة الرابعة')
+        st.info('المؤشرات تُحسب من أحدث فترتين سنويتين متاحتين. نمو الأرباح لا يُحسب كنسبة تقليدية إذا كانت الفترة السابقة صفرًا أو خسارة. جودة الأرباح = التدفق النقدي التشغيلي ÷ صافي الربح، وتُعرض فقط عندما يكون صافي الربح موجبًا. المؤشر والدرجة مبدئيان وليسا توصية شراء أو قيمة عادلة.')
+        indicators_df = build_financial_indicators(summary_df, annual_df, quarterly_df)
+        if indicators_df.empty:
+            st.warning('لا توجد بيانات كافية لحساب المؤشرات. ابدأ جلب البيانات المالية أولًا.')
+        else:
+            ix1, ix2, ix3 = st.columns(3)
+            ix1.metric('أسهم لها مؤشرات', int(indicators_df['درجة القوة المالية المبدئية /100'].notna().sum()))
+            ix2.metric('أسهم ببيانات محدودة', int(indicators_df['حالة المؤشر'].str.contains('محدودة', na=False).sum()))
+            ix3.metric('قطاعات مصنفة', int(indicators_df.loc[indicators_df['القطاع المبدئي'] != 'غير محدد','القطاع المبدئي'].nunique()))
+            sector_filter = st.multiselect('تصفية حسب القطاع', sorted(indicators_df['القطاع المبدئي'].dropna().unique()), default=sorted(indicators_df['القطاع المبدئي'].dropna().unique()))
+            view = indicators_df[indicators_df['القطاع المبدئي'].isin(sector_filter)].sort_values('درجة القوة المالية المبدئية /100', ascending=False, na_position='last')
+            st.dataframe(view, use_container_width=True, hide_index=True,
+                         column_config={
+                             'نمو الإيرادات سنويًا %': st.column_config.NumberColumn(format='%.1f%%'),
+                             'نمو صافي الربح سنويًا %': st.column_config.NumberColumn(format='%.1f%%'),
+                             'هامش صافي الربح %': st.column_config.NumberColumn(format='%.2f%%'),
+                             'ROE العائد على حقوق الملكية %': st.column_config.NumberColumn(format='%.2f%%'),
+                             'ROA العائد على الأصول %': st.column_config.NumberColumn(format='%.2f%%'),
+                             'درجة القوة المالية المبدئية /100': st.column_config.NumberColumn(format='%.1f'),
+                             'تغطية البيانات الأساسية %': st.column_config.NumberColumn(format='%.1f%%'),
+                         })
+            st.download_button('⬇️ تنزيل مؤشرات التحليل المالي CSV', view.to_csv(index=False).encode('utf-8-sig'), 'egx_financial_indicators.csv', 'text/csv')
+            with st.expander('منهجية الدرجة القطاعية المبدئية'):
+                st.markdown("""- **البنوك:** وزن أعلى للعائد على حقوق الملكية ونمو الأرباح، ووزن أقل لهامش الربح، ولا تُستخدم نسبة الالتزامات/حقوق الملكية في الدرجة لأنها غير قابلة للمقارنة مباشرة مع الشركات غير المالية.
+- **العقارات:** أوزان للنمو والربحية والعائد والرفع المالي والتدفقات النقدية.
+- **الخدمات المالية غير المصرفية:** مزيج من النمو والعوائد وجودة الأرباح والرفع المالي.
+- **الصناعة والأدوية وباقي القطاعات:** أوزان عامة أولية للنمو والربحية والعوائد والرفع المالي والتدفقات النقدية.
+- القطاع المعيّن آليًا تقريبي ويحتاج مراجعة. لا تتوفر حاليًا كل مؤشرات القطاع المتخصصة (مثل NPL وCAR للبنوك أو مؤشرات التشغيل الخاصة بالعقارات)، لذلك لا تعتبر هذه الدرجة مقارنة مؤسسية نهائية.
+- عند غياب أي مؤشر، لا يُعامل على أنه صفر؛ تُعاد موازنة أوزان المؤشرات المتاحة، وتظهر تغطية البيانات بوضوح.""")

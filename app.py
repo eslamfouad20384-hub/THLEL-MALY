@@ -703,8 +703,132 @@ def build_financial_indicators(summary_df, annual_df, quarterly_df):
     return pd.DataFrame(rows)
 
 
+# ========================= المرحلة الخامسة: محرك القيمة العادلة =========================
+# مضاعفات مرجعية مبدئية وليست مضاعفات سوقية لحظية؛ يجب معايرتها دوريًا ومراجعتها لكل سهم.
+SECTOR_MULTIPLES = {
+    'بنوك': {'pe': 7.5, 'pb': 1.05, 'pe_weight': 0.35, 'pb_weight': 0.65},
+    'خدمات مالية غير مصرفية': {'pe': 9.0, 'pb': 1.15, 'pe_weight': 0.55, 'pb_weight': 0.45},
+    'عقارات': {'pe': 8.0, 'pb': 0.95, 'pe_weight': 0.55, 'pb_weight': 0.45},
+    'صناعة ومواد أساسية': {'pe': 9.0, 'pb': 1.10, 'pe_weight': 0.70, 'pb_weight': 0.30},
+    'أدوية ورعاية صحية': {'pe': 12.0, 'pb': 1.50, 'pe_weight': 0.70, 'pb_weight': 0.30},
+    'اتصالات وتكنولوجيا': {'pe': 10.0, 'pb': 1.35, 'pe_weight': 0.65, 'pb_weight': 0.35},
+    'أغذية ومشروبات': {'pe': 10.0, 'pb': 1.30, 'pe_weight': 0.65, 'pb_weight': 0.35},
+    'طاقة وبترول': {'pe': 7.5, 'pb': 1.00, 'pe_weight': 0.65, 'pb_weight': 0.35},
+    'غير محدد': {'pe': 8.0, 'pb': 1.00, 'pe_weight': 0.50, 'pb_weight': 0.50},
+}
+
+def build_fair_values(summary_df, annual_df, indicators_df=None):
+    """Transparent relative valuation engine; refuses to force a value from weak or implausible inputs."""
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame()
+    annual = _latest_period_rows(annual_df)
+    ind_lookup = {}
+    if indicators_df is not None and not indicators_df.empty and 'رمز السهم' in indicators_df:
+        ind_lookup = {str(r['رمز السهم']): r.to_dict() for _, r in indicators_df.iterrows()}
+    rows = []
+    for _, summary in summary_df.iterrows():
+        symbol = str(summary.get('رمز السهم', ''))
+        sector = classify_sector(symbol)
+        mult = SECTOR_MULTIPLES.get(sector, SECTOR_MULTIPLES['غير محدد'])
+        price = _num(summary, 'السعر من آخر إغلاق يومي (جنيه)')
+        bvps_raw = _num(summary, 'القيمة الدفترية للسهم (جنيه)')
+        a = annual[annual['رمز السهم'].astype(str).eq(symbol)].sort_values('نهاية الفترة', ascending=False) if not annual.empty else pd.DataFrame()
+        latest = a.iloc[0].to_dict() if not a.empty else {}
+        previous = a.iloc[1].to_dict() if len(a) > 1 else {}
+        net_income = _num(latest, 'صافي الربح')
+        prev_income = _num(previous, 'صافي الربح')
+        shares = _num(summary, 'عدد الأسهم')
+        # Use the phase-four financial-strength result to modestly adjust valuation multiples.
+        ind = ind_lookup.get(symbol, {})
+        financial_score = _num(ind, 'درجة القوة المالية المبدئية /100')
+        multiple_adjustment = 1.0
+        if np.isfinite(financial_score):
+            multiple_adjustment = float(np.clip(0.85 + financial_score / 100.0 * 0.30, 0.85, 1.15))
+        pe_mult_used = mult['pe'] * multiple_adjustment
+        pb_mult_used = mult['pb'] * multiple_adjustment
+        source = str(latest.get('مصدر البيانات المالية', ''))
+        eps = np.nan
+        flags = []
+        # Earnings-per-share is calculated only when both earnings and share count exist.
+        if np.isfinite(net_income) and np.isfinite(shares) and shares > 0:
+            eps_candidate = net_income / shares
+            # Basic unit/plausibility guard; suspicious EPS is excluded rather than silently scaled.
+            if np.isfinite(price) and price > 0 and abs(eps_candidate) > price * 2:
+                flags.append('ربحية/عدد أسهم غير متسقين سعريًا؛ استُبعد مضاعف الربحية')
+            else:
+                eps = eps_candidate
+        # Do not use an implausible book value as a valuation anchor.
+        bvps = bvps_raw
+        if np.isfinite(price) and price > 0 and np.isfinite(bvps) and (bvps > price * 10 or bvps < price / 100):
+            flags.append('القيمة الدفترية تحتاج مراجعة؛ استُبعد مضاعف القيمة الدفترية')
+            bvps = np.nan
+        pe_value = eps * pe_mult_used if np.isfinite(eps) and eps > 0 else np.nan
+        pb_value = bvps * pb_mult_used if np.isfinite(bvps) and bvps > 0 else np.nan
+        # Reduce dependence on a single abnormal profit year where prior-year profit is available.
+        if np.isfinite(eps) and eps > 0 and np.isfinite(prev_income) and prev_income > 0 and np.isfinite(shares) and shares > 0:
+            prev_eps = prev_income / shares
+            if (not np.isfinite(price)) or abs(prev_eps) <= max(price * 2, 0.01):
+                sustainable_eps = 0.70 * eps + 0.30 * prev_eps
+                pe_value = sustainable_eps * pe_mult_used
+        components = []
+        if np.isfinite(pe_value) and pe_value > 0:
+            components.append((pe_value, mult['pe_weight'], 'الربحية ومضاعف القطاع'))
+        if np.isfinite(pb_value) and pb_value > 0:
+            components.append((pb_value, mult['pb_weight'], 'القيمة الدفترية ومضاعف القطاع'))
+        if components:
+            weight_sum = sum(x[1] for x in components)
+            fair = sum(x[0] * x[1] for x in components) / weight_sum
+            method = ' + '.join(x[2] for x in components)
+        else:
+            fair = np.nan
+            method = 'لا توجد مدخلات موثوقة كافية'
+        # Scenario bands represent valuation uncertainty, not predicted price movements.
+        low = fair * 0.80 if np.isfinite(fair) else np.nan
+        high = fair * 1.20 if np.isfinite(fair) else np.nan
+        safe_buy = fair * 0.80 if np.isfinite(fair) else np.nan
+        upside = (fair / price - 1) * 100 if np.isfinite(fair) and np.isfinite(price) and price > 0 else np.nan
+        mos = (1 - price / fair) * 100 if np.isfinite(fair) and fair > 0 and np.isfinite(price) and price > 0 else np.nan
+        # Coverage/confidence explicitly penalizes missing inputs and uncertain classifications.
+        used = len(components)
+        confidence = 25 + 25 * used
+        if np.isfinite(price): confidence += 10
+        if np.isfinite(net_income): confidence += 10
+        if np.isfinite(shares): confidence += 10
+        if latest: confidence += 10
+        if sector == 'غير محدد': confidence -= 10
+        if flags: confidence -= 15
+        confidence = int(max(0, min(100, confidence)))
+        if used == 0:
+            status = 'غير قابل للتقييم — بيانات ربحية/دفترية غير كافية'
+        elif confidence < 55:
+            status = 'ثقة منخفضة — راجع الوحدات والقوائم'
+        elif used == 1:
+            status = 'تقييم بطريقة واحدة فقط'
+        else:
+            status = 'تقييم نسبي مبدئي — طريقتان'
+        rows.append({
+            'رمز السهم': symbol, 'قطاع التقييم': sector,
+            'القيمة العادلة التقديرية (جنيه)': round(fair, 2) if np.isfinite(fair) else np.nan,
+            'نطاق القيمة العادلة الأدنى (جنيه)': round(low, 2) if np.isfinite(low) else np.nan,
+            'نطاق القيمة العادلة الأعلى (جنيه)': round(high, 2) if np.isfinite(high) else np.nan,
+            'سعر الشراء بهامش أمان 20% (جنيه)': round(safe_buy, 2) if np.isfinite(safe_buy) else np.nan,
+            'الفرق عن القيمة العادلة %': round(upside, 2) if np.isfinite(upside) else np.nan,
+            'هامش الأمان مقابل القيمة العادلة %': round(mos, 2) if np.isfinite(mos) else np.nan,
+            'ربحية السهم المحسوبة EPS (جنيه)': round(eps, 4) if np.isfinite(eps) else np.nan,
+            'قيمة الربحية بمضاعف القطاع (جنيه)': round(pe_value, 2) if np.isfinite(pe_value) else np.nan,
+            'قيمة الدفترية بمضاعف القطاع (جنيه)': round(pb_value, 2) if np.isfinite(pb_value) else np.nan,
+            'مضاعف الربحية المرجعي': mult['pe'], 'مضاعف القيمة الدفترية المرجعي': mult['pb'],
+            'مضاعف الربحية بعد تعديل القوة المالية': round(pe_mult_used, 2), 'مضاعف الدفترية بعد تعديل القوة المالية': round(pb_mult_used, 2),
+            'درجة القوة المالية المستخدمة': round(financial_score, 1) if np.isfinite(financial_score) else np.nan,
+            'منهج التقييم المستخدم': method, 'ثقة نموذج التقييم /100': confidence,
+            'حالة التقييم': status, 'آخر سنة مالية مستخدمة': latest.get('نهاية الفترة', ''),
+            'مصدر القوائم المستخدمة': source, 'تنبيهات التقييم': '؛ '.join(flags) if flags else 'لا يوجد تنبيه آلي؛ تحقق من الوحدات والإفصاحات'
+        })
+    return pd.DataFrame(rows)
+
+
 st.title('📊 الأسهم المصرية — بيانات السعر والقوائم المالية')
-st.caption('مرحلة 1: السعر اليومي والقيمة الدفترية. مرحلة 2: القوائم السنوية والربع سنوية وعدد الأسهم. مرحلة 3: تدقيق جودة البيانات. مرحلة 4: مؤشرات مالية أولية مع أوزان قطاعية مختلفة.')
+st.caption('مرحلة 1: السعر اليومي والقيمة الدفترية. مرحلة 2: القوائم السنوية والربع سنوية وعدد الأسهم. مرحلة 3: تدقيق الجودة. مرحلة 4: المؤشرات المالية. مرحلة 5: محرك القيمة العادلة القطاعي.')
 with st.expander('مصادر البيانات وحدود التغطية', expanded=False):
     st.markdown('''- **السعر اليومي:** آخر إغلاق يومي متاح من Yahoo Finance، مع تاريخ الشمعة.
 - **القيمة الدفترية:** Mubasher ثم StockAnalysis ثم Yahoo Finance، مع إبقاء الخانة فارغة إذا لم نجد رقمًا صالحًا.
@@ -764,11 +888,18 @@ if 'summary_results' in st.session_state:
     b.metric('أسعار يومية متاحة', int(summary_df['السعر من آخر إغلاق يومي (جنيه)'].notna().sum()))
     c.metric('أسهم لها بيانات سنوية', int(annual_df['رمز السهم'].nunique()) if not annual_df.empty else 0)
     d.metric('أسهم لها بيانات ربع سنوية', int(quarterly_df['رمز السهم'].nunique()) if not quarterly_df.empty else 0)
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['ملخص الأسهم', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها', 'مؤشرات التحليل المالي'])
+    indicators_df = build_financial_indicators(summary_df, annual_df, quarterly_df)
+    valuation_df = build_fair_values(summary_df, annual_df, indicators_df)
+    if not valuation_df.empty:
+        valuation_cols = [c for c in valuation_df.columns if c != 'رمز السهم']
+        summary_df = summary_df.merge(valuation_df[['رمز السهم'] + valuation_cols], on='رمز السهم', how='left')
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['ملخص الأسهم والقيمة العادلة', 'القوائم السنوية', 'القوائم ربع السنوية', 'تدقيق جودة البيانات', 'مقارنة المصادر وروابطها', 'مؤشرات التحليل المالي', 'تفاصيل التقييم'])
     with tab1:
+        st.markdown('### ملخص السوق والقيمة العادلة')
+        st.caption('القيمة العادلة تقدير نسبي مبدئي مبني على مضاعفات قطاعية مرجعية، وليس DCF كاملًا أو توصية شراء. السعر هو آخر إغلاق يومي متاح.')
         st.dataframe(summary_df, use_container_width=True, hide_index=True,
                      column_config={'رابط مباشر': st.column_config.LinkColumn('رابط مباشر'), 'رابط StockAnalysis': st.column_config.LinkColumn('رابط StockAnalysis')})
-        st.download_button('⬇️ تنزيل ملخص الأسهم CSV', summary_df.to_csv(index=False).encode('utf-8-sig'), 'egx_summary.csv', 'text/csv')
+        st.download_button('⬇️ تنزيل ملخص الأسهم مع القيمة العادلة CSV', summary_df.to_csv(index=False).encode('utf-8-sig'), 'egx_summary_fair_value.csv', 'text/csv')
     with tab2:
         if annual_df.empty:
             st.warning('لم يتم إرجاع قوائم سنوية من المصدر للرموز المختارة.')
@@ -824,7 +955,6 @@ if 'summary_results' in st.session_state:
     with tab6:
         st.markdown('### مؤشرات التحليل المالي — المرحلة الرابعة')
         st.info('المؤشرات تُحسب من أحدث فترتين سنويتين متاحتين. نمو الأرباح لا يُحسب كنسبة تقليدية إذا كانت الفترة السابقة صفرًا أو خسارة. جودة الأرباح = التدفق النقدي التشغيلي ÷ صافي الربح، وتُعرض فقط عندما يكون صافي الربح موجبًا. المؤشر والدرجة مبدئيان وليسا توصية شراء أو قيمة عادلة.')
-        indicators_df = build_financial_indicators(summary_df, annual_df, quarterly_df)
         if indicators_df.empty:
             st.warning('لا توجد بيانات كافية لحساب المؤشرات. ابدأ جلب البيانات المالية أولًا.')
         else:
@@ -852,3 +982,34 @@ if 'summary_results' in st.session_state:
 - **الصناعة والأدوية وباقي القطاعات:** أوزان عامة أولية للنمو والربحية والعوائد والرفع المالي والتدفقات النقدية.
 - القطاع المعيّن آليًا تقريبي ويحتاج مراجعة. لا تتوفر حاليًا كل مؤشرات القطاع المتخصصة (مثل NPL وCAR للبنوك أو مؤشرات التشغيل الخاصة بالعقارات)، لذلك لا تعتبر هذه الدرجة مقارنة مؤسسية نهائية.
 - عند غياب أي مؤشر، لا يُعامل على أنه صفر؛ تُعاد موازنة أوزان المؤشرات المتاحة، وتظهر تغطية البيانات بوضوح.""")
+
+    with tab7:
+        st.markdown('### محرك القيمة العادلة — تفاصيل كل سهم')
+        st.warning('هذا إصدار أولي يعتمد على مضاعفات ربحية/قيمة دفترية مرجعية حسب القطاع، ويعدل المضاعفات بشكل محدود وفق درجة القوة المالية في المرحلة الرابعة. لا يستخدم DCF/FCFF بعد، لأن التدفق الحر والإنفاق الرأسمالي وتكلفة رأس المال الموثوقة ليست متاحة باستمرار لكل الشركات. القيم المرجعية ليست مضاعفات سوقية مباشرة.')
+        if valuation_df.empty:
+            st.info('لا توجد نتائج تقييم. اجلب البيانات المالية أولًا.')
+        else:
+            v1, v2, v3 = st.columns(3)
+            v1.metric('أسهم لها قيمة عادلة', int(valuation_df['القيمة العادلة التقديرية (جنيه)'].notna().sum()))
+            v2.metric('تقييم بطريقتين', int(valuation_df['منهج التقييم المستخدم'].str.contains(' + ', regex=False, na=False).sum()))
+            v3.metric('ثقة منخفضة', int(valuation_df['حالة التقييم'].str.contains('منخفضة|غير قابل', regex=True, na=False).sum()))
+            only = st.checkbox('عرض الأسهم التي لها قيمة عادلة فقط', value=False)
+            vv = valuation_df.copy()
+            if only:
+                vv = vv[vv['القيمة العادلة التقديرية (جنيه)'].notna()]
+            vv = vv.sort_values('الفرق عن القيمة العادلة %', ascending=False, na_position='last')
+            st.dataframe(vv, use_container_width=True, hide_index=True,
+                column_config={
+                    'القيمة العادلة التقديرية (جنيه)': st.column_config.NumberColumn(format='%.2f'),
+                    'نطاق القيمة العادلة الأدنى (جنيه)': st.column_config.NumberColumn(format='%.2f'),
+                    'نطاق القيمة العادلة الأعلى (جنيه)': st.column_config.NumberColumn(format='%.2f'),
+                    'سعر الشراء بهامش أمان 20% (جنيه)': st.column_config.NumberColumn(format='%.2f'),
+                    'الفرق عن القيمة العادلة %': st.column_config.NumberColumn(format='%.1f%%'),
+                    'هامش الأمان مقابل القيمة العادلة %': st.column_config.NumberColumn(format='%.1f%%'),
+                    'ثقة نموذج التقييم /100': st.column_config.ProgressColumn(min_value=0, max_value=100, format='%d'),
+                })
+            st.download_button('⬇️ تنزيل تقرير القيمة العادلة CSV', vv.to_csv(index=False).encode('utf-8-sig'), 'egx_fair_value_report.csv', 'text/csv')
+            with st.expander('كيف يحسب المحرك القيمة العادلة؟'):
+                st.markdown("""1. **مضاعف الربحية:** صافي الربح السنوي ÷ عدد الأسهم، ثم مضاعف مرجعي للقطاع. عند توفر ربحيتين سنويتين موجبتين، يستخدم المحرك مزيجًا 70% من أحدث ربحية و30% من السابقة لتخفيف أثر سنة استثنائية.\n2. **مضاعف القيمة الدفترية:** القيمة الدفترية للسهم × مضاعف مرجعي للقطاع.\n3. **تعديل جودة الشركة:** يستخدم درجة القوة المالية من المرحلة الرابعة لتعديل المضاعفات بنسبة محدودة بين 0.85 و1.15؛ لا تُستخدم الدرجة إذا كانت البيانات الأساسية غير كافية.
+4. **دمج الطريقتين:** أوزان قطاعية؛ للبنوك وزن أعلى للقيمة الدفترية، وللشركات التشغيلية وزن أعلى للربحية. إذا توفرت طريقة واحدة فقط، لا يخترع المحرك الثانية.\n5. **النطاق:** ±20% حول القيمة الوسطية للتعبير عن عدم اليقين، وليس توقعًا مضمونًا. سعر الشراء بهامش أمان 20% = 80% من القيمة العادلة.\n6. **موانع الثقة:** يستبعد بعض المدخلات غير المنطقية سعريًا ويعرض تنبيهًا بدل تصحيح الوحدات تلقائيًا. راجع تنبيهات التقييم ومصدر القوائم قبل الاعتماد على أي رقم.\n7. **حدود مهمة:** مضاعفات القطاع افتراضات أولية ثابتة داخل الكود وليست مستخرجة آليًا من متوسط شركات القطاع الحالية. لا توجد بعد نمذجة DCF مكتملة، أو توزيعات أرباح، أو تطبيع للتضخم/العملة، أو مراجعة لكل الإفصاحات الرسمية.""")
+
